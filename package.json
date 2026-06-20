@@ -10,6 +10,7 @@
         "scan": "typenode ./cli/index.tsx scan",
         "connect": "typenode ./cli/index.tsx connect",
         "cli-smoke": "typenode ./cli/smokeTest.ts",
+        "fetch-corpus": "typenode ./scripts/fetchCorpus.ts",
         "type": "yarn tsc --noEmit",
         "test": "typenode ./test/runTests.ts"
     },
