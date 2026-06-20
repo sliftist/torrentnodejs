@@ -7,11 +7,16 @@ import { parseTorrentBuffer, TorrentMeta } from "../torrentFile";
 // it has at least one HTTP/UDP tracker — we are tracker-only (no DHT/PEX), so
 // magnet/wss-only torrents would be undownloadable.
 //
-//   yarn fetch-corpus [dir] [count] [gigabytes]
+//   yarn fetch-corpus [dir] [count] [gigabytes] [seed]
 //
-// Defaults: ./test-corpus, 1000 torrents, 100 GB. Stops at whichever cap is hit
-// first. Re-running is safe: existing .torrent files are skipped, so an
-// interrupted run resumes.
+// Defaults: ./test-corpus, 1000 torrents, 100 GB, random seed. Stops at
+// whichever cap is hit first. Re-running is safe: existing .torrent files are
+// skipped, so an interrupted run resumes.
+//
+// Each run shuffles its traversal of the (most-downloaded) pool of each
+// collection using the seed, so two runs — or two output directories — get
+// different torrents instead of the same top-of-the-list items every time.
+// The seed is printed; pass it back as the 4th arg to reproduce a set exactly.
 //
 // Note on the count/bytes balance: these collections range from KB-sized texts
 // to GB-sized concerts. The draw order below is weighted toward smaller items
@@ -22,6 +27,10 @@ const DEFAULT_DIR = "test-corpus";
 const DEFAULT_COUNT = 1000;
 const DEFAULT_GIB = 100;
 const IA_PAGE_ROWS = 100;
+// We only shuffle within the top N pages (by download count) of each
+// collection so the picks stay reasonably well-seeded, while still differing
+// run to run. N*IA_PAGE_ROWS items per collection make up the draw pool.
+const POPULAR_PAGES = 50;
 const FETCH_TIMEOUT_MS = 30000;
 const GIB = 1024 * 1024 * 1024;
 
@@ -67,11 +76,12 @@ interface CorpusState {
     bytes: number;
 }
 
-// Lazily pages through one archive.org collection, yielding identifiers.
+// Lazily walks a shuffled set of pages of one archive.org collection, yielding
+// identifiers in shuffled order.
 interface CollectionCursor {
     collection: string;
+    pageQueue: number[];
     docs: { identifier: string }[];
-    page: number;
     idx: number;
     done: boolean;
 }
@@ -80,11 +90,15 @@ async function main() {
     const dir = path.resolve(process.argv[2] || DEFAULT_DIR);
     const targetCount = parseInt(process.argv[3] || String(DEFAULT_COUNT), 10);
     const targetBytes = Math.round(parseFloat(process.argv[4] || String(DEFAULT_GIB)) * GIB);
+    let seed = Date.now() >>> 0;
+    if (process.argv[5]) seed = parseInt(process.argv[5], 10) >>> 0;
+    const rng = makeRng(seed);
     await mkdir(dir, { recursive: true });
 
     const state: CorpusState = { dir, targetCount, targetBytes, seenHashes: new Set(), count: 0, bytes: 0 };
     await indexExisting(state);
     console.log(`Target: ${targetCount} torrents / ${(targetBytes / GIB).toFixed(0)} GB into ${dir}`);
+    console.log(`Seed: ${seed} (pass as 4th arg to reproduce this exact set)`);
     console.log(`Already present: ${state.count} torrents, ${(state.bytes / GIB).toFixed(2)} GB\n`);
 
     // Curated high-seed list first.
@@ -93,16 +107,20 @@ async function main() {
         await tryAddFromUrl(state, url, path.basename(new URL(url).pathname));
     }
 
-    // Archive.org, weighted round-robin one item at a time.
+    // Archive.org, weighted round-robin one item at a time. Each collection
+    // walks a shuffled subset of its most-downloaded pages.
     const cursors = new Map<string, CollectionCursor>();
-    for (const col of IA_COLLECTIONS) cursors.set(col, { collection: col, docs: [], page: 1, idx: 0, done: false });
+    for (const col of IA_COLLECTIONS) {
+        const pageQueue = shuffle(range(1, POPULAR_PAGES), rng);
+        cursors.set(col, { collection: col, pageQueue, docs: [], idx: 0, done: false });
+    }
 
     while (!capReached(state) && [...cursors.values()].some((c) => !exhausted(c))) {
         for (const col of IA_DRAW_ORDER) {
             if (capReached(state)) break;
             const cursor = cursors.get(col);
             if (!cursor) continue;
-            const id = await nextIdentifier(cursor);
+            const id = await nextIdentifier(cursor, rng);
             if (!id) continue;
             const url = `https://archive.org/download/${id}/${id}_archive.torrent`;
             await tryAddFromUrl(state, url, `${sanitize(id)}.torrent`);
@@ -140,14 +158,14 @@ async function indexExisting(s: CorpusState): Promise<void> {
     }
 }
 
-async function nextIdentifier(c: CollectionCursor): Promise<string | undefined> {
+async function nextIdentifier(c: CollectionCursor, rng: () => number): Promise<string | undefined> {
     while (true) {
         if (c.idx < c.docs.length) return c.docs[c.idx++].identifier;
-        if (c.done) return undefined;
-        const docs = await fetchArchivePage(c.collection, c.page);
-        c.page++;
-        if (docs.length === 0) { c.done = true; return undefined; }
-        c.docs = docs;
+        const page = c.pageQueue.shift();
+        if (page === undefined) { c.done = true; return undefined; }
+        const docs = await fetchArchivePage(c.collection, page);
+        if (docs.length === 0) continue;
+        c.docs = shuffle(docs, rng);
         c.idx = 0;
     }
 }
@@ -222,6 +240,34 @@ async function fetchWithTimeout(url: string): Promise<Response> {
     } finally {
         clearTimeout(timer);
     }
+}
+
+// Small seeded PRNG (mulberry32) so a given seed always yields the same set.
+function makeRng(seed: number): () => number {
+    let s = seed >>> 0;
+    return () => {
+        s = (s + 0x6d2b79f5) >>> 0;
+        let t = s;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+}
+
+function shuffle<T>(arr: T[], rng: () => number): T[] {
+    for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(rng() * (i + 1));
+        const tmp = arr[i];
+        arr[i] = arr[j];
+        arr[j] = tmp;
+    }
+    return arr;
+}
+
+function range(from: number, to: number): number[] {
+    const out: number[] = [];
+    for (let i = from; i <= to; i++) out.push(i);
+    return out;
 }
 
 function sanitize(id: string): string {

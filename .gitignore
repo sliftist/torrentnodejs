@@ -12,8 +12,10 @@ downloads
 seed-data/
 *.bin
 
-# Stress-test corpus fetched by scripts/fetchCorpus.ts (default output dir).
+# Stress-test corpora fetched by scripts/fetchCorpus.ts.
 test-corpus/
+corpus-*/
+*-corpus/
 
 # CLI runtime config — may contain local paths to WireGuard credentials.
 bittorrent.config.yaml
