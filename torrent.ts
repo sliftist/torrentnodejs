@@ -10,9 +10,19 @@ import { Storage } from "./storage";
 import { TcpListenerLike } from "./transport";
 import { Duplex } from "stream";
 
+// How many lifecycle phases the torrent actually runs:
+//  - "scan":    open + SHA-1 verify on-disk pieces only. No network at all.
+//  - "connect": scan, then announce + connect to peers to learn what pieces
+//               are available and what peers request — but never request or
+//               serve block data (no bytes transferred).
+//  - "full":    every phase — actually download and upload (default).
+export type RunMode = "scan" | "connect" | "full";
+
 export interface TorrentOptions {
     saveDir: string;
     selection?: PieceSelection;
+    // See RunMode. Defaults to "full".
+    mode?: RunMode;
     maxPeers?: number;
     pipelineDepth?: number;
     peerConnectTimeoutMs?: number;
@@ -148,6 +158,9 @@ export class Torrent extends EventEmitter {
             if (this.pieceManager.isComplete()) this.emit("complete");
         }
 
+        // Scan-only mode stops here: drive checked, no network brought up.
+        if ((this.options.mode ?? "full") === "scan") return;
+
         // Open a TCP listener for inbound peers.
         if (this.options.listenPort !== undefined) {
             this.listener = await this.transport.listenTcp({ port: this.options.listenPort });
@@ -271,6 +284,8 @@ export class Torrent extends EventEmitter {
     }
 
     private async serveBlock(conn: PeerConnection, req: { index: number; begin: number; length: number }): Promise<void> {
+        // Only "full" mode transfers bytes; connect mode just observes requests.
+        if ((this.options.mode ?? "full") !== "full") return;
         if (conn.amChoking) return;
         if (!this.pieceManager.haveBitfield.get(req.index)) return;
         const MAX_BLOCK = 128 * 1024; // sanity cap (BEP 3 strongly suggests <= 128KB)
@@ -294,6 +309,9 @@ export class Torrent extends EventEmitter {
     }
 
     private pumpRequests(key: string): void {
+        // Only "full" mode downloads; connect mode learns availability but
+        // never asks for block data.
+        if ((this.options.mode ?? "full") !== "full") return;
         const conn = this.peerConnections.get(key);
         if (!conn) return;
         if (conn.peerChoking) return;

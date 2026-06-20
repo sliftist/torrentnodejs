@@ -4,7 +4,7 @@ import { statSync } from "fs";
 import { TorrentManager } from "../torrentManager";
 import { SourceWatcher } from "../watcher";
 import { normalizeForFilter, truncate } from "./format";
-import { cleanPathInput } from "../config";
+import { cleanPathInput, RUN_MODES, RunMode } from "../config";
 import { Header } from "./header";
 import { TorrentTable } from "./torrentTable";
 import { DetailView, DETAIL_TABS, DetailTab } from "./detailView";
@@ -76,6 +76,7 @@ export function App(props: AppProps) {
         }
 
         // list mode
+        if (key.tab) { manager.setMode(nextRunMode(manager.runMode)); return; }
         if (key.upArrow) { setSelectedIndex((i) => Math.max(0, i - 1)); return; }
         if (key.downArrow) { setSelectedIndex((i) => Math.min(views.length - 1, i + 1)); return; }
         if (key.escape) { setFilter(""); return; }
@@ -107,7 +108,7 @@ export function App(props: AppProps) {
 
     return (
         <Box flexDirection="column" width={width}>
-            <Header agg={manager.aggregate()} localIP={localIP} width={width} />
+            <Header agg={manager.aggregate()} localIP={localIP} width={width} mode={manager.runMode} />
             <Box flexDirection="column" flexGrow={1} marginTop={1}>
                 {mode === "detail" && detail && detailViewModel ? (
                     <DetailView view={detailViewModel} detail={detail} tab={tab} scroll={scroll} width={width} height={bodyHeight} />
@@ -146,13 +147,18 @@ function Footer(props: { width: number; mode: Mode; filter: string; folders: str
             <Box>
                 <Text dimColor>
                     {mode === "list"
-                        ? "type to filter · paste a folder path + Enter to watch · ↑↓ select · Enter open · Ctrl+C quit"
+                        ? "type to filter · paste a folder path + Enter to watch · ↑↓ select · Enter open · Tab cycle mode · Ctrl+C quit"
                         : ""}
                 </Text>
                 {notice ? <Text color="yellow">  {truncate(notice, width - 4)}</Text> : null}
             </Box>
         </Box>
     );
+}
+
+function nextRunMode(current: RunMode): RunMode {
+    const i = RUN_MODES.indexOf(current);
+    return RUN_MODES[(i + 1) % RUN_MODES.length];
 }
 
 function nextTab(current: DetailTab, dir: 1 | -1): DetailTab {

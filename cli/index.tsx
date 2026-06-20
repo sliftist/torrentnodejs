@@ -4,11 +4,12 @@ import { WireGuardNetwork } from "wireguardnodejs";
 import { App } from "./ui/app";
 import { TorrentManager } from "./torrentManager";
 import { SourceWatcher } from "./watcher";
-import { Config, configExists, loadConfig, saveConfig, expandHome } from "./config";
+import { Config, configExists, loadConfig, saveConfig, expandHome, parseRunMode, MODE_LABEL, MODE_DESC } from "./config";
 import { runFirstRunSetup } from "./setup";
 import { WgTransport } from "./wgTransport";
 
 async function main() {
+    const mode = parseRunMode(process.argv[2]);
     const config: Config = (await configExists()) ? await loadConfig() : await runFirstRunSetup();
 
     // Bring up the tunnel. This is the ONLY network path the client has — if it
@@ -24,7 +25,9 @@ async function main() {
         downloadDir: config.downloadDir,
         scheduler: config.scheduler,
         listenPortBase: config.listenPort,
+        mode,
     });
+    process.stdout.write(`Run mode: ${MODE_LABEL[mode]} — ${MODE_DESC[mode]}.\n`);
 
     const watcher = new SourceWatcher({
         intervalMs: config.scheduler.watchIntervalMs,

@@ -93,6 +93,28 @@ async function main() {
     assert.strictEqual(agg.torrents, 1);
     console.log(`aggregate: torrents=${agg.torrents} downloading=${agg.downloading} seeding=${agg.seeding}`);
 
+    // --- scan mode runs with zero network (stubTransport throws on any dial),
+    // so reaching a settled state proves the drive-scan phase is self-contained.
+    const scanMgr = new TorrentManager({
+        transport: stubTransport,
+        downloadDir,
+        scheduler: { ...DEFAULT_SCHEDULER },
+        listenPortBase: 7001,
+        stateDir: work,
+        mode: "scan",
+    });
+    await scanMgr.start();
+    await scanMgr.addSourceFile(torrentDst);
+    // Scheduler ticks once a second; wait long enough to start + verify.
+    await delay(1800);
+    const scanViews = scanMgr.views();
+    assert.strictEqual(scanViews.length, 1, "scan manager sees the torrent");
+    // Files aren't on disk, so the verified result is "checked" (incomplete).
+    assert.strictEqual(scanViews[0].state, "checked", `expected checked, got ${scanViews[0].state}`);
+    assert.strictEqual(scanMgr.runMode, "scan");
+    console.log(`scan mode: state=${scanViews[0].state} (no network touched)`);
+    await scanMgr.stop();
+
     // Remove the file → watcher should drop it.
     await rm(torrentDst);
     await delay(600);

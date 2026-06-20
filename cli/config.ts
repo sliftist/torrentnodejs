@@ -2,8 +2,34 @@ import { readFile, writeFile, stat, mkdir } from "fs/promises";
 import path from "path";
 import os from "os";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import type { RunMode } from "../torrent";
+
+export type { RunMode };
 
 export const CONFIG_FILENAME = "bittorrent.config.yaml";
+
+// Cycle order for the in-app mode switch and the canonical list of modes.
+export const RUN_MODES: RunMode[] = ["scan", "connect", "full"];
+
+export const MODE_LABEL: Record<RunMode, string> = {
+    scan: "SCAN",
+    connect: "CONNECT",
+    full: "FULL",
+};
+
+// One-line explanation shown in the header so the user always knows why
+// transfers may not be happening.
+export const MODE_DESC: Record<RunMode, string> = {
+    scan: "drive scan + hash verify only — NO peers, NO transfers",
+    connect: "scan + find peers/availability — NO upload, NO download",
+    full: "all phases — actively downloading and uploading",
+};
+
+export function parseRunMode(arg: string | undefined): RunMode {
+    const m = (arg || "full").trim().toLowerCase();
+    if (m === "scan" || m === "connect" || m === "full") return m;
+    throw new Error(`Unknown mode "${arg}". Expected one of: scan, connect, full.`);
+}
 
 // qBittorrent-style scheduler knobs. Defaults mirror its out-of-the-box caps.
 export interface SchedulerSettings {

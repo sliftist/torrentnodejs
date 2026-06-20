@@ -6,6 +6,8 @@ import { formatBytes, formatRate, formatPercent, progressBar, truncate } from ".
 const STATE_COLOR: Record<string, string> = {
     queued: "gray",
     checking: "blue",
+    checked: "blue",
+    ready: "magenta",
     downloading: "cyan",
     seeding: "green",
     paused: "yellow",

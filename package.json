@@ -7,6 +7,8 @@
         "start": "typenode ./cli/index.tsx",
         "torrent": "typenode ./cli/index.tsx",
         "cli": "typenode ./cli/index.tsx",
+        "scan": "typenode ./cli/index.tsx scan",
+        "connect": "typenode ./cli/index.tsx connect",
         "cli-smoke": "typenode ./cli/smokeTest.ts",
         "type": "yarn tsc --noEmit",
         "test": "typenode ./test/runTests.ts"

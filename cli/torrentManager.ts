@@ -5,6 +5,7 @@ import { readFile, writeFile } from "fs/promises";
 import { Transport } from "../transport";
 import { Torrent } from "../torrent";
 import { TorrentMeta, parseTorrentFile } from "../torrentFile";
+import { RunMode } from "../torrent";
 import { SchedulerSettings } from "./config";
 
 const STATE_FILENAME = "bittorrent.state.json";
@@ -13,6 +14,8 @@ const RATE_ALPHA = 0.35; // EMA smoothing for rates
 export type TorrentState =
     | "queued"      // known, waiting for a scheduler slot
     | "checking"    // verifying on-disk pieces at startup
+    | "checked"     // scan-mode: drive verified, nothing more to do
+    | "ready"       // connect-mode: peers/availability known, no transfers
     | "downloading" // active, still missing pieces
     | "seeding"     // active, complete, serving to others
     | "paused"      // user-paused; never scheduled
@@ -79,6 +82,8 @@ export interface TorrentManagerOptions {
     listenPortBase: number;
     stateDir?: string;
     peerId?: Buffer;
+    // Initial run mode. Defaults to "full". Changeable at runtime via setMode.
+    mode?: RunMode;
 }
 
 // Owns the full lifecycle of every torrent: parsing, the qBittorrent-style
@@ -91,6 +96,7 @@ export class TorrentManager extends EventEmitter {
     private readonly scheduler: SchedulerSettings;
     private readonly peerId: Buffer;
     private readonly stateDir: string;
+    private mode: RunMode;
     private readonly torrents = new Map<string, ManagedTorrent>(); // by infoHash
     private readonly bySource = new Map<string, string>();          // sourcePath -> infoHash
     private pausedPersisted = new Set<string>();
@@ -107,6 +113,25 @@ export class TorrentManager extends EventEmitter {
         this.peerId = opts.peerId ?? Buffer.concat([Buffer.from("-CK0001-"), crypto.randomBytes(12)]);
         this.stateDir = opts.stateDir ?? process.cwd();
         this.nextListenPort = opts.listenPortBase;
+        this.mode = opts.mode ?? "full";
+    }
+
+    get runMode(): RunMode { return this.mode; }
+
+    // Switch run mode at runtime. Running torrents are torn down and re-queued
+    // so they restart under the new phase gating (e.g. connect→full begins
+    // actually transferring; full→scan drops all peer connections).
+    setMode(mode: RunMode): void {
+        if (mode === this.mode) return;
+        this.mode = mode;
+        for (const m of this.torrents.values()) {
+            if (!m.torrent) continue;
+            void m.torrent.stop().catch(() => {});
+            m.torrent = undefined;
+            if (m.state !== "paused" && m.state !== "error") m.state = "queued";
+        }
+        this.emit("notice", `Mode → ${mode}`);
+        this.emit("update");
     }
 
     async start(): Promise<void> {
@@ -276,8 +301,8 @@ export class TorrentManager extends EventEmitter {
                 m.upRate = RATE_ALPHA * uInst + (1 - RATE_ALPHA) * m.upRate;
                 m.lastDown = down;
                 m.lastUp = up;
-                if (m.state !== "paused") {
-                    m.state = t.progress >= 1 ? "seeding" : "downloading";
+                if (m.state !== "paused" && m.state !== "error") {
+                    m.state = this.settledState(t);
                 }
             } else {
                 m.downRate *= 1 - RATE_ALPHA;
@@ -289,11 +314,28 @@ export class TorrentManager extends EventEmitter {
         this.emit("update");
     }
 
+    // The state a running torrent settles into once its check completes,
+    // given the current run mode.
+    private settledState(t: Torrent): TorrentState {
+        if (this.mode === "scan") return t.progress >= 1 ? "done" : "checked";
+        if (this.mode === "connect") return "ready";
+        return t.progress >= 1 ? "seeding" : "downloading";
+    }
+
     // qBittorrent-style active caps: count current actives, then fill spare
     // slots from the queue (FIFO by insertion order) respecting per-category
     // and total caps. Downloads are prioritized over seeds for the total cap.
+    // Only "full" mode is slot-limited; scan/connect bring up every torrent
+    // since they do bounded work and transfer no data.
     private runScheduler(): void {
         const all = [...this.torrents.values()];
+        if (this.mode !== "full") {
+            for (const m of all) {
+                if (m.paused || m.torrent || m.state === "error") continue;
+                this.startTorrent(m);
+            }
+            return;
+        }
         const activeDownloads = all.filter((m) => m.torrent && m.state === "downloading").length;
         const activeSeeds = all.filter((m) => m.torrent && m.state === "seeding").length;
         let dlSlots = this.scheduler.maxActiveDownloads - activeDownloads;
@@ -329,6 +371,7 @@ export class TorrentManager extends EventEmitter {
                 maxPeers: this.scheduler.maxPeersPerTorrent,
                 listenPort: m.listenPort,
                 verifyExisting: true,
+                mode: this.mode,
             },
         });
         m.torrent = t;
@@ -339,7 +382,7 @@ export class TorrentManager extends EventEmitter {
         });
         t.start()
             .then(() => {
-                m.state = t.progress >= 1 ? "seeding" : "downloading";
+                if (m.state !== "paused" && m.state !== "error") m.state = this.settledState(t);
                 this.emit("update");
             })
             .catch((e: Error) => {
