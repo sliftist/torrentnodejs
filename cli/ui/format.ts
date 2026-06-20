@@ -1,5 +1,23 @@
+// Compact human number with K/M/G/T suffixes and at most a couple of decimals
+// (fewer as the integer part grows), trailing zeros trimmed. Keeps EMA floats
+// like 523.7283938 from blowing out a fixed-width column.
+export function formatNumber(n: number): string {
+    if (!isFinite(n)) return "0";
+    const neg = n < 0;
+    let v = Math.abs(n);
+    const units = ["", "K", "M", "G", "T", "P"];
+    let i = 0;
+    while (v >= 1000 && i < units.length - 1) { v /= 1000; i++; }
+    let decimals = 2;
+    if (v >= 100) decimals = 0;
+    else if (v >= 10) decimals = 1;
+    let s = v.toFixed(decimals);
+    if (s.includes(".")) s = s.replace(/\.?0+$/, "");
+    return (neg ? "-" : "") + s + units[i];
+}
+
 export function formatBytes(n: number): string {
-    if (n < 1024) return `${n} B`;
+    if (n < 1024) return `${Math.round(n)} B`;
     const units = ["KB", "MB", "GB", "TB"];
     let v = n / 1024;
     let i = 0;
@@ -9,7 +27,7 @@ export function formatBytes(n: number): string {
 
 export function formatRate(bytesPerSec: number): string {
     if (bytesPerSec < 1) return "0 B/s";
-    return `${formatBytes(bytesPerSec)}/s`;
+    return `${formatNumber(bytesPerSec)}B/s`;
 }
 
 export function formatPercent(p: number): string {
