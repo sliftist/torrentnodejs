@@ -4,6 +4,7 @@ import { statSync } from "fs";
 import { TorrentManager } from "../torrentManager";
 import { SourceWatcher } from "../watcher";
 import { normalizeForFilter, truncate } from "./format";
+import { cleanPathInput } from "../config";
 import { Header } from "./header";
 import { TorrentTable } from "./torrentTable";
 import { DetailView, DETAIL_TABS, DetailTab } from "./detailView";
@@ -80,7 +81,7 @@ export function App(props: AppProps) {
         if (key.escape) { setFilter(""); return; }
         if (key.backspace || key.delete) { setFilter((f) => f.slice(0, -1)); return; }
         if (key.return) {
-            const candidate = filter.trim();
+            const candidate = cleanPathInput(filter);
             if (candidate && isDirectory(candidate)) {
                 onAddSource(candidate);
                 setNotice(`Watching ${candidate}`);

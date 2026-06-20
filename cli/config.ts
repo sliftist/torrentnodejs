@@ -96,8 +96,28 @@ export async function pathExists(p: string): Promise<boolean> {
     return (await stat(p).catch(() => null)) !== null;
 }
 
+// Drive-letter (C:\ or C:/) or UNC (\\server\share) absolute path.
+const WINDOWS_ABSOLUTE = /^[A-Za-z]:[\\/]|^\\\\/;
+
+// Users routinely paste paths that the OS wrapped in quotes (Windows
+// "Copy as path" does this) plus stray whitespace. Strip those before any
+// path logic, otherwise the leading quote hides the drive letter and the
+// path is treated as relative.
+export function cleanPathInput(p: string): string {
+    let s = p.trim();
+    if (s.length >= 2 && (s[0] === '"' || s[0] === "'") && s[s.length - 1] === s[0]) {
+        s = s.slice(1, -1).trim();
+    }
+    return s;
+}
+
 export function expandHome(p: string): string {
-    if (p === "~") return os.homedir();
-    if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
-    return path.resolve(p);
+    const s = cleanPathInput(p);
+    if (s === "~") return os.homedir();
+    if (s.startsWith("~/") || s.startsWith("~\\")) return path.join(os.homedir(), s.slice(2));
+    // A Windows absolute path is already resolved. Running under posix
+    // (e.g. tests on Linux) path.resolve would mistake it for relative and
+    // prepend cwd, so return it untouched.
+    if (WINDOWS_ABSOLUTE.test(s)) return s;
+    return path.resolve(s);
 }

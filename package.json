@@ -4,17 +4,12 @@
     "license": "MIT",
     "main": "./index.ts",
     "scripts": {
-        "type": "yarn tsc --noEmit",
-        "test": "typenode ./test/runTests.ts",
-        "parse-bbb": "typenode ./scripts/parseBbb.ts",
-        "announce-bbb": "typenode ./scripts/announceBbb.ts",
-        "handshake-bbb": "typenode ./scripts/handshakeBbb.ts",
-        "download-bbb": "typenode ./scripts/downloadBbb.ts",
-        "seed-loop-test": "typenode ./scripts/seedLoopTest.ts",
-        "seed-for-user": "typenode ./scripts/seedForUser.ts",
-        "check-trackers": "typenode ./scripts/checkTrackers.ts",
+        "start": "typenode ./cli/index.tsx",
+        "torrent": "typenode ./cli/index.tsx",
         "cli": "typenode ./cli/index.tsx",
-        "cli-smoke": "typenode ./cli/smokeTest.ts"
+        "cli-smoke": "typenode ./cli/smokeTest.ts",
+        "type": "yarn tsc --noEmit",
+        "test": "typenode ./test/runTests.ts"
     },
     "dependencies": {
         "ink": "^3.2.0",
