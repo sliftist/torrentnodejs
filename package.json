@@ -1,0 +1,32 @@
+{
+    "name": "bittorrent",
+    "version": "0.0.1",
+    "license": "MIT",
+    "main": "./index.ts",
+    "scripts": {
+        "type": "yarn tsc --noEmit",
+        "test": "typenode ./test/runTests.ts",
+        "parse-bbb": "typenode ./scripts/parseBbb.ts",
+        "announce-bbb": "typenode ./scripts/announceBbb.ts",
+        "handshake-bbb": "typenode ./scripts/handshakeBbb.ts",
+        "download-bbb": "typenode ./scripts/downloadBbb.ts",
+        "seed-loop-test": "typenode ./scripts/seedLoopTest.ts",
+        "seed-for-user": "typenode ./scripts/seedForUser.ts",
+        "check-trackers": "typenode ./scripts/checkTrackers.ts",
+        "cli": "typenode ./cli/index.tsx",
+        "cli-smoke": "typenode ./cli/smokeTest.ts"
+    },
+    "dependencies": {
+        "ink": "^3.2.0",
+        "ink-text-input": "^4.0.3",
+        "react": "^17.0.2",
+        "typenode": "*",
+        "wireguardnodejs": "git+ssh://git@github.com/sliftist/wireguardnodejs.git#main",
+        "yaml": "^2.4.0"
+    },
+    "devDependencies": {
+        "@types/node": "^22.0.0",
+        "@types/react": "^17.0.0",
+        "typescript": "^5.4.0"
+    }
+}

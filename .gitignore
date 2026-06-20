@@ -1,0 +1,18 @@
+node_modules
+build
+dist
+**/dist
+yarn-error.log
+*.log
+downloads
+*.mp4
+*.mkv
+
+# Generated test seed data (large random blobs).
+seed-data/
+*.bin
+
+# CLI runtime config — may contain local paths to WireGuard credentials.
+bittorrent.config.yaml
+# CLI runtime state (pause flags, etc.)
+bittorrent.state.json
