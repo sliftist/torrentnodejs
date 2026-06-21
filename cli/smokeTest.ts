@@ -48,12 +48,14 @@ async function main() {
     assert.strictEqual(loaded.scheduler.downloadSlots, DEFAULT_SCHEDULER.downloadSlots);
     console.log("config roundtrip OK");
 
-    // --- manager + watcher, scheduler disabled so nothing dials the network ---
+    // --- manager + watcher. The stub transport throws on every dial, so the
+    // torrent starts and verifies the (absent) files but can never connect to a
+    // peer; with no peers it never earns a download slot and stays "queued". ---
     const manager = new TorrentManager({
         transport: stubTransport,
         downloadDir,
-        scheduler: { ...DEFAULT_SCHEDULER, downloadSlots: 0, seedSlots: 0 },
-        listenPortBase: 6881,
+        scheduler: { ...DEFAULT_SCHEDULER, downloadSlots: 0 },
+        listenPort: 6881,
         stateDir: work,
     });
     await manager.start();
@@ -78,7 +80,7 @@ async function main() {
     let views = manager.views();
     assert.strictEqual(views.length, 1, `expected 1 torrent, got ${views.length}`);
     assert.match(views[0].name, /Big Buck Bunny/i);
-    assert.strictEqual(views[0].state, "queued"); // caps=0 so never starts
+    assert.strictEqual(views[0].state, "queued"); // started + verified, but no peers → no slot
     console.log(`torrent discovered: "${views[0].name}" state=${views[0].state}`);
 
     // detail() should fall back to the announce-list trackers even when inactive.
@@ -99,7 +101,7 @@ async function main() {
         transport: stubTransport,
         downloadDir,
         scheduler: { ...DEFAULT_SCHEDULER },
-        listenPortBase: 7001,
+        listenPort: 7001,
         stateDir: work,
         mode: "scan",
     });

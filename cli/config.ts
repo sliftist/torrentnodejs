@@ -31,17 +31,26 @@ export function parseRunMode(arg: string | undefined): RunMode {
     throw new Error(`Unknown mode "${arg}". Expected one of: scan, connect, full.`);
 }
 
-// Slot-based scheduler. A torrent occupies a download slot while it is being
-// checked or is incomplete, and a seed slot once it is complete. Slots also
-// bound how many torrents touch the disk/network at once, which keeps the
-// process well under its file-descriptor limit.
+// Global limits from the spec. Every torrent is announced and connects to
+// peers; the download SLOTS gate only which torrents actively request blocks,
+// while connections/rates/upload-slots are enforced globally across all of them.
 export interface SchedulerSettings {
-    // Max torrents checking or downloading at once.
-    downloadSlots: number;
-    // Max torrents seeding (uploading) at once.
-    seedSlots: number;
+    // Max simultaneous peer connections across every torrent.
+    activeConnections: number;
     // Per-torrent peer connection cap.
-    maxPeersPerTorrent: number;
+    connectionsPerTorrent: number;
+    // Max torrents actively downloading (requesting blocks) at once.
+    downloadSlots: number;
+    // Global unchoke (upload) slots shared by all torrents.
+    uploadSlots: number;
+    // How many of the upload slots rotate randomly (optimistic unchoke).
+    optimisticUnchokeSlots: number;
+    // Global upload / download rate caps, in megabits per second (0 = unlimited).
+    uploadMbps: number;
+    downloadMbps: number;
+    // A downloading torrent that makes no progress this long may lose its slot
+    // to a waiting torrent.
+    downloadSkipLimitMs: number;
     // How often the source folders are rescanned for .torrent files (ms).
     watchIntervalMs: number;
 }
@@ -60,9 +69,14 @@ export interface Config {
 }
 
 export const DEFAULT_SCHEDULER: SchedulerSettings = {
+    activeConnections: 500,
+    connectionsPerTorrent: 100,
     downloadSlots: 32,
-    seedSlots: 8,
-    maxPeersPerTorrent: 40,
+    uploadSlots: 16,
+    optimisticUnchokeSlots: 2,
+    uploadMbps: 10,
+    downloadMbps: 80,
+    downloadSkipLimitMs: 5 * 60 * 1000,
     watchIntervalMs: 3000,
 };
 

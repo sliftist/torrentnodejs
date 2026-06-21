@@ -34,6 +34,19 @@ export function formatPercent(p: number): string {
     return `${(p * 100).toFixed(1)}%`;
 }
 
+export function formatEta(seconds: number): string {
+    if (!isFinite(seconds)) return "∞";
+    if (seconds <= 0) return "0s";
+    const s = Math.round(seconds);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ${s % 60}s`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ${m % 60}m`;
+    const d = Math.floor(h / 24);
+    return `${d}d ${h % 24}h`;
+}
+
 // Normalize for filtering: keep only [a-z0-9], lowercased. Spaces and special
 // characters are dropped so "Big Buck Bunny!" matches "bigbuck".
 export function normalizeForFilter(s: string): string {

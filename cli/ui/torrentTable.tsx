@@ -10,6 +10,7 @@ const STATE_COLOR: Record<string, string> = {
     ready: "magenta",
     downloading: "cyan",
     seeding: "green",
+    idle: "gray",
     paused: "yellow",
     done: "green",
     error: "red",
@@ -17,9 +18,9 @@ const STATE_COLOR: Record<string, string> = {
 
 const SECTION_COLOR: Record<string, string> = {
     downloading: "cyan",
-    willDownload: "gray",
+    downloadingQueued: "gray",
     seeding: "green",
-    willSeed: "gray",
+    seedingIdle: "gray",
 };
 
 // One visible row in the flattened render: either a section heading or a torrent.
@@ -102,7 +103,7 @@ export function TorrentTable(props: {
                         <Box width={8}><Text>{formatPercent(v.progress)}</Text></Box>
                         <Box width={11}><Text color="cyan">{formatRate(v.downRate)}</Text></Box>
                         <Box width={11}><Text color="green">{formatRate(v.upRate)}</Text></Box>
-                        <Text>{v.peerCount}</Text>
+                        <Text>{`${v.connectedPeers}/${v.swarmPeers}`}</Text>
                     </Box>
                 );
             })}

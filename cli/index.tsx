@@ -24,7 +24,7 @@ async function main() {
         transport,
         downloadDir: config.downloadDir,
         scheduler: config.scheduler,
-        listenPortBase: config.listenPort,
+        listenPort: config.listenPort,
         mode,
     });
     process.stdout.write(`Run mode: ${MODE_LABEL[mode]} — ${MODE_DESC[mode]}.\n`);

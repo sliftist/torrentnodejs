@@ -1,7 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { TorrentDetail, TorrentView } from "../torrentManager";
-import { formatBytes, formatRate, formatPercent, progressBar, truncate } from "./format";
+import { formatBytes, formatRate, formatPercent, formatEta, progressBar, truncate } from "./format";
 
 export const DETAIL_TABS = ["general", "peers", "trackers", "pieces", "files"] as const;
 export type DetailTab = (typeof DETAIL_TABS)[number];
@@ -58,7 +58,11 @@ function GeneralTab(props: { view: TorrentView; detail: TorrentDetail }) {
         ["Uploaded", formatBytes(view.uploadedBytes)],
         ["Down rate", formatRate(view.downRate)],
         ["Up rate", formatRate(view.upRate)],
-        ["Peers", String(view.peerCount)],
+        ["ETA", formatEta(view.etaSeconds)],
+        ["Ratio", view.ratio.toFixed(2)],
+        ["Peers", `${view.connectedPeers} connected · ${view.seeders} seeders / ${view.swarmPeers} in swarm`],
+        ["Unchoke", `${view.peersUnchokingUs} unchoking us · ${view.peersWeUnchoked} we unchoked`],
+        ["Trackers", `${view.trackersResponding} / ${view.trackersTotal} responding`],
         ["Pieces", `${detail.pieceCounts.done} done / ${detail.pieceCounts.downloading} active / ${detail.pieceCounts.needed} needed`],
         ["Source", view.sourcePath],
     ];

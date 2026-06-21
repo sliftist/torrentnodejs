@@ -29,6 +29,10 @@ export interface PeerConnectionOptions {
     host?: string;                // required if connecting outbound
     port?: number;                // required if connecting outbound
     socket?: Duplex;              // if provided, skip transport.connectTcp (incoming peer)
+    // Bytes already read off `socket` before this connection took over (used by
+    // the shared listener, which must peek the handshake to route by info_hash).
+    // Replayed through the parser once listeners are attached.
+    initialData?: Buffer;
     infoHash: Buffer;
     peerId: Buffer;
     numPieces: number;
@@ -62,6 +66,11 @@ export class PeerConnection extends EventEmitter {
     readonly remotePeerId: Buffer = Buffer.alloc(0);
     peerBitfield: Bitfield;
 
+    // Cumulative payload bytes transferred over this connection. The global
+    // choke manager samples these to rank peers by speed.
+    bytesDownloaded = 0;
+    bytesUploaded = 0;
+
     // Peer wire state (BEP 3 §"Peer protocol"):
     amChoking = true;
     amInterested = false;
@@ -91,6 +100,14 @@ export class PeerConnection extends EventEmitter {
         sock.on("end", () => this.onClose());
 
         sock.write(buildHandshake(this.opts.infoHash, this.opts.peerId));
+
+        // Replay any bytes the listener already consumed (the inbound handshake,
+        // and possibly a trailing bitfield). Deferred to a microtask so the
+        // handshake-wait listeners below are registered before it runs.
+        if (this.opts.initialData && this.opts.initialData.length > 0) {
+            const initial = this.opts.initialData;
+            queueMicrotask(() => this.onData(initial));
+        }
 
         // Wait for incoming handshake (both peers send their handshake immediately on connect)
         await new Promise<void>((resolve, reject) => {
@@ -174,6 +191,7 @@ export class PeerConnection extends EventEmitter {
         buf.writeUInt32BE(begin, 9);
         block.copy(buf, 13);
         this.writeRaw(buf);
+        this.bytesUploaded += block.length;
     }
 
     sendKeepalive(): void {
@@ -292,6 +310,7 @@ export class PeerConnection extends EventEmitter {
                 const index = payload.readUInt32BE(0);
                 const begin = payload.readUInt32BE(4);
                 const block = Buffer.from(payload.subarray(8));
+                this.bytesDownloaded += block.length;
                 this.emit("piece", { index, begin, block } as PieceMessage);
                 break;
             }

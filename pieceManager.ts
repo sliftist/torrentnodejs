@@ -5,6 +5,11 @@ import { Bitfield } from "./bitfield";
 
 export const BLOCK_SIZE = 16 * 1024;
 
+// Once this few blocks remain unfetched we enter endgame: the final blocks get
+// requested from every available peer at once and the duplicates are cancelled
+// as soon as one arrives, so a single slow peer can't stall us at ~99%.
+export const ENDGAME_BLOCK_THRESHOLD = 50;
+
 export interface PieceSelection {
     // Pick by explicit piece indices, an [from, toExclusive) piece range,
     // file paths in the torrent, and/or a byte range within the concatenated
@@ -17,6 +22,15 @@ export interface PieceSelection {
 }
 
 export interface BlockRequest {
+    pieceIndex: number;
+    begin: number;
+    length: number;
+}
+
+// A duplicate in-flight request (on a different peer) that should now be
+// cancelled because the block arrived. Only populated during endgame.
+export interface CanceledRequest {
+    peerId: string;
     pieceIndex: number;
     begin: number;
     length: number;
@@ -102,6 +116,22 @@ export class PieceManager extends EventEmitter {
         const counts = { needed: 0, downloading: 0, done: 0 };
         for (const i of this.selected) counts[this.progress[i].state]++;
         return counts;
+    }
+
+    // Blocks we still don't have across every not-done selected piece.
+    remainingBlocks(): number {
+        let n = 0;
+        for (const i of this.selected) {
+            const p = this.progress[i];
+            if (p.state === "done") continue;
+            for (const b of p.blocks) if (!b.have) n++;
+        }
+        return n;
+    }
+
+    inEndgame(): boolean {
+        const remaining = this.remainingBlocks();
+        return remaining > 0 && remaining <= ENDGAME_BLOCK_THRESHOLD;
     }
 
     // For pure-seeder mode: declare every selected piece already done without
@@ -193,6 +223,7 @@ export class PieceManager extends EventEmitter {
     pickBlock(peerId: string): BlockRequest | undefined {
         const peerBf = this.peerBitfields.get(peerId);
         if (!peerBf) return undefined;
+        if (this.inEndgame()) return this.pickBlockEndgame(peerBf, peerId);
         const candidates: { pieceIndex: number; rarity: number }[] = [];
         let minRarity = Infinity;
 
@@ -230,6 +261,29 @@ export class PieceManager extends EventEmitter {
         return { pieceIndex: pick.pieceIndex, begin: blockIdx * BLOCK_SIZE, length: piece.blocks[blockIdx].length };
     }
 
+    // Endgame picker: hand out any block this peer has that we still don't,
+    // even if it's already in flight to another peer — but never the same block
+    // twice to the same peer. Duplicates get cancelled when one copy lands.
+    private pickBlockEndgame(peerBf: Bitfield, peerId: string): BlockRequest | undefined {
+        for (let i = 0; i < this.numPieces; i++) {
+            if (!this.selected.has(i)) continue;
+            const p = this.progress[i];
+            if (p.state === "done") continue;
+            if (!peerBf.get(i)) continue;
+            for (let blockIdx = 0; blockIdx < p.blocks.length; blockIdx++) {
+                const block = p.blocks[blockIdx];
+                if (block.have) continue;
+                if (this.inflight.has(`${i}:${blockIdx}:${peerId}`)) continue;
+                if (p.state === "needed") {
+                    p.state = "downloading";
+                    p.buffer = Buffer.alloc(pieceLengthAt(this.meta, i));
+                }
+                return { pieceIndex: i, begin: blockIdx * BLOCK_SIZE, length: block.length };
+            }
+        }
+        return undefined;
+    }
+
     markInflight(req: BlockRequest, peerId: string): void {
         const piece = this.progress[req.pieceIndex];
         const blockIndex = req.begin / BLOCK_SIZE;
@@ -243,7 +297,7 @@ export class PieceManager extends EventEmitter {
     // Returns the SHA-1-verified, fully-assembled piece buffer if completion
     // and verification succeeded; undefined if the block was stored but the
     // piece isn't complete yet; throws if rejected/duplicate/wrong-hash.
-    addBlock(req: BlockRequest, data: Buffer, peerId: string): { kind: "stored" } | { kind: "complete"; piece: Buffer } | { kind: "duplicate" } | { kind: "rejected"; reason: string } {
+    addBlock(req: BlockRequest, data: Buffer, peerId: string): { kind: "stored"; canceled: CanceledRequest[] } | { kind: "complete"; piece: Buffer; canceled: CanceledRequest[] } | { kind: "duplicate" } | { kind: "rejected"; reason: string } {
         if (!this.selected.has(req.pieceIndex)) return { kind: "rejected", reason: "piece not selected" };
         const piece = this.progress[req.pieceIndex];
         if (piece.state === "done") return { kind: "duplicate" };
@@ -261,9 +315,15 @@ export class PieceManager extends EventEmitter {
         piece.receivedBytes += data.length;
         this.downloadedBytesField += data.length;
 
-        // Clean inflight entries for this block from ALL peers
+        // Clean inflight entries for this block from ALL peers. Any that were
+        // pending on OTHER peers (endgame duplicates) are reported so the caller
+        // can send cancels.
+        const canceled: CanceledRequest[] = [];
         for (const [key, entry] of [...this.inflight]) {
             if (entry.pieceIndex === req.pieceIndex && entry.blockIndex === blockIndex) {
+                if (entry.peerId !== peerId) {
+                    canceled.push({ peerId: entry.peerId, pieceIndex: req.pieceIndex, begin: req.begin, length: block.length });
+                }
                 this.inflight.delete(key);
             }
         }
@@ -283,9 +343,9 @@ export class PieceManager extends EventEmitter {
             // do it AFTER it has written the piece to storage and emitted
             // "piece" itself, so observers see the events in order.
             this.emit("piece-complete", req.pieceIndex);
-            return { kind: "complete", piece: finalBuffer };
+            return { kind: "complete", piece: finalBuffer, canceled };
         }
-        return { kind: "stored" };
+        return { kind: "stored", canceled };
     }
 
     private resetPiece(pieceIndex: number): void {

@@ -22,7 +22,8 @@ export function Header(props: { agg: AggregateView; localIP: string; width: numb
                 <Text>{`torrents ${agg.torrents}  `}</Text>
                 <Text color="cyan">{`↓dl ${agg.downloading} `}</Text>
                 <Text color="green">{`↑seed ${agg.seeding} `}</Text>
-                <Text color="yellow">{`⏸ ${agg.paused}`}</Text>
+                <Text color="yellow">{`⏸ ${agg.paused}  `}</Text>
+                <Text dimColor>{`conns ${agg.connections}`}</Text>
             </Box>
             <Box>
                 <Text color="cyan">{`↓ ${formatRate(agg.downRate)}  `}</Text>
