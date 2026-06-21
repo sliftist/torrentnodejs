@@ -53,6 +53,16 @@ export interface TcpListenerLike extends EventEmitter {
     // emits 'error' (err: Error)
 }
 
+// Cumulative wire-level traffic counters. Optional because only the WireGuard
+// transport can see true on-the-wire bytes (encrypted datagrams, handshakes,
+// keepalives); the Node transport has no single chokepoint to count.
+export interface TrafficStats {
+    bytesSent: number;
+    bytesReceived: number;
+    packetsSent: number;
+    packetsReceived: number;
+}
+
 export interface Transport {
     fetch(url: string, init?: FetchInit): Promise<FetchResponse>;
     connectTcp(opts: ConnectTcpOptions): Promise<Duplex>;
@@ -62,6 +72,9 @@ export interface Transport {
     resolve(hostname: string): Promise<string>;
     // Bind a TCP listener so peers can connect TO us for seeding.
     listenTcp(opts?: { port?: number; address?: string }): Promise<TcpListenerLike>;
+    // Total bytes/packets that have crossed the underlying tunnel, if the
+    // transport can measure it.
+    trafficStats?(): TrafficStats;
 }
 
 export class NodeTransport implements Transport {

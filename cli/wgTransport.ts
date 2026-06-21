@@ -8,6 +8,7 @@ import {
     ConnectTcpOptions,
     UdpSocketLike,
     TcpListenerLike,
+    TrafficStats,
 } from "../transport";
 
 // The ONLY Transport the CLI ever constructs. It speaks exclusively through a
@@ -40,6 +41,10 @@ export class WgTransport implements Transport {
         // WireGuardTcpListener already exposes port()/close() and emits
         // 'connection' (socket, info) — exactly the TcpListenerLike shape.
         return this.wg.listenTcp(opts) as unknown as TcpListenerLike;
+    }
+
+    trafficStats(): TrafficStats {
+        return this.wg.trafficStats;
     }
 }
 

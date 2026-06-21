@@ -2,7 +2,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import { AggregateView } from "../torrentManager";
 import { RunMode, MODE_LABEL, MODE_DESC } from "../config";
-import { formatBytes, formatRate } from "./format";
+import { formatBytes, formatRate, formatNumber } from "./format";
 
 export function Header(props: { agg: AggregateView; localIP: string; width: number; mode: RunMode }) {
     const { agg, localIP, width, mode } = props;
@@ -29,6 +29,12 @@ export function Header(props: { agg: AggregateView; localIP: string; width: numb
                 <Text color="cyan">{`↓ ${formatRate(agg.downRate)}  `}</Text>
                 <Text color="green">{`↑ ${formatRate(agg.upRate)}   `}</Text>
                 <Text dimColor>{`total ↓${formatBytes(agg.downloadedBytes)} ↑${formatBytes(agg.uploadedBytes)}`}</Text>
+            </Box>
+            <Box>
+                <Text dimColor>tunnel </Text>
+                <Text color="cyan">{`↓ ${formatRate(agg.wireRecvRate)}  `}</Text>
+                <Text color="green">{`↑ ${formatRate(agg.wireSendRate)}   `}</Text>
+                <Text dimColor>{`total ↓${formatBytes(agg.wireBytesReceived)} ↑${formatBytes(agg.wireBytesSent)} · pkts ↓${formatNumber(agg.wirePacketsReceived)} ↑${formatNumber(agg.wirePacketsSent)}`}</Text>
             </Box>
         </Box>
     );

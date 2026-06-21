@@ -88,6 +88,15 @@ export interface AggregateView {
     upRate: number;
     downloadedBytes: number;
     uploadedBytes: number;
+    // True wire-level tunnel traffic (encrypted bytes/packets incl. overhead),
+    // with bytes/sec smoothed over a trailing window. Zero when the transport
+    // can't measure it.
+    wireBytesSent: number;
+    wireBytesReceived: number;
+    wirePacketsSent: number;
+    wirePacketsReceived: number;
+    wireSendRate: number;
+    wireRecvRate: number;
 }
 
 export interface TorrentDetail {
@@ -159,6 +168,11 @@ export class TorrentManager extends EventEmitter {
     private stopped = false;
     private frontSeq = 0;
     private backSeq = 0;
+    // Wire-level traffic rate sampling (EMA over the trailing window).
+    private lastWireSent = 0;
+    private lastWireReceived = 0;
+    private wireSendRate = 0;
+    private wireRecvRate = 0;
 
     // Shared services, created on start().
     private peerListener?: PeerListener;
@@ -307,12 +321,19 @@ export class TorrentManager extends EventEmitter {
             dl += m.torrent?.downloadedBytes ?? 0;
             ul += m.torrent?.uploadedBytes ?? 0;
         }
+        const wire = this.transport.trafficStats?.();
         return {
             torrents: this.torrents.size,
             downloading, seeding, paused,
             connections: this.connectionBudget?.count ?? 0,
             downRate, upRate,
             downloadedBytes: dl, uploadedBytes: ul,
+            wireBytesSent: wire?.bytesSent ?? 0,
+            wireBytesReceived: wire?.bytesReceived ?? 0,
+            wirePacketsSent: wire?.packetsSent ?? 0,
+            wirePacketsReceived: wire?.packetsReceived ?? 0,
+            wireSendRate: this.wireSendRate,
+            wireRecvRate: this.wireRecvRate,
         };
     }
 
@@ -469,6 +490,16 @@ export class TorrentManager extends EventEmitter {
                 m.lastUploadBytes = up;
                 m.lastUploadAtMs = now;
             }
+        }
+
+        const wire = this.transport.trafficStats?.();
+        if (wire) {
+            const sInst = Math.max(0, wire.bytesSent - this.lastWireSent) / dt;
+            const rInst = Math.max(0, wire.bytesReceived - this.lastWireReceived) / dt;
+            this.wireSendRate = RATE_ALPHA * sInst + (1 - RATE_ALPHA) * this.wireSendRate;
+            this.wireRecvRate = RATE_ALPHA * rInst + (1 - RATE_ALPHA) * this.wireRecvRate;
+            this.lastWireSent = wire.bytesSent;
+            this.lastWireReceived = wire.bytesReceived;
         }
 
         this.runScheduler(now);

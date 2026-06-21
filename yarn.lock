@@ -392,7 +392,7 @@ widest-line@^3.1.0:
 
 "wireguardnodejs@git+ssh://git@github.com/sliftist/wireguardnodejs.git#main":
   version "0.0.1"
-  resolved "git+ssh://git@github.com/sliftist/wireguardnodejs.git#e6ca85357a3d57dfa269567bfba01a9ddc45c55c"
+  resolved "git+ssh://git@github.com/sliftist/wireguardnodejs.git#70ff9d4a70884284a85fd120600623276398cbb8"
   dependencies:
     typenode "*"
 
