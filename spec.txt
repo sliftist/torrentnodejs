@@ -1,0 +1,54 @@
+Torrent client specification
+
+Limits (and defaults)
+    Active connections - 500
+        Connections per torrent - 100
+    Download slots - 32
+    Upload limit before choking - 16
+    Upload bitrate - 10mbps
+    Download bitrate - 80mbps
+    Download skip limit - 5 minutes
+
+We announce all the torrents. Follow the intervals specified by the tracker announces.
+
+We don't give something a download slot if it has no peers. And then once all the download slots fill up, we wait. If a torrent spends too long without making any progress (download skip limit) AND And the other downloads that want the download slots, then we take away its download slot and we give it to something else. Having a rolling queue. Any new downloads go to the front of this queue.
+
+Downloading Mechanics:
+    - Express `Interested` to all peers that have pieces we need.
+    - Download from any peer that `Unchokes` us (no artificial limit on concurrent downloading peers, just the global 80mbps limit).
+    - Pipelining: Maintain ~5-10 pending block requests per unchoked peer to saturate the connection.
+    - Piece Selection: 
+        - Prioritize finishing partially downloaded pieces.
+        - Use Rarest-First selection for new pieces to improve swarm health.
+        - Use Endgame Mode (requesting the final missing blocks from all available peers) to prevent stalling at 99%.
+
+Uploading / Seeding Mechanics:
+    - We have 16 upload slots ("Upload limit before choking").
+    - Choking Algorithm (Tit-for-Tat): Every ~10 seconds, evaluate peers. Unchoke the peers that provide us the best download speeds.
+    - Optimistic Unchoking: Keep 1-2 upload slots rotating randomly among interested peers to discover faster connections and help new peers.
+    - Global Rate Limiting: Apply the 10mbps limit across the active, unchoked upload slots.
+
+Single listener for all torrents (why would you ever use a listener per torrent).
+
+When downloading, we should create the file of the full size ahead of time so we can download to specific spots on the disk. 
+
+Temporary directory on the same drive as the output folder that we store the pending downloads in, using a rename to move it to the final destination when the download finishes. 
+
+UI
+    Torrent
+        progress
+        peers unchoking us (downloading from) / peers we unchoked (uploading to)
+        connected peers / seeders / peers
+        download speed / upload speed
+        eta
+        upload ratio
+        tracker responding / trackers total
+
+Torrents split into lists:
+    downloading actively
+    seeding actively
+    downloading but queued (not enough download slots available)
+    seeding, but no one has download for the last minute.
+
+forwardPort from socket-function for upnp forwarding
+
