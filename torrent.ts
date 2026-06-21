@@ -11,6 +11,7 @@ import { RateLimiter } from "./rateLimiter";
 import { ChokeManager } from "./chokeManager";
 import { ConnectionBudget } from "./connectionBudget";
 import { DialStats } from "./dialStats";
+import { yieldIfBlocked } from "./cooperativeYield";
 
 // How many lifecycle phases the torrent actually runs:
 //  - "scan":   open + SHA-1 verify on-disk pieces only. No network at all.
@@ -269,11 +270,14 @@ export class Torrent extends EventEmitter {
         this.options.peerListener?.unregister(this.infoHashHex);
         await this.tracker.stop();
         // destroy() doesn't emit 'close' (so disconnectPeer won't run); release
-        // each held connection slot here exactly once.
+        // each held connection slot here exactly once. Each destroy sends a TCP
+        // RST (synchronous encrypt + native send); yield if a peer-heavy torrent
+        // would otherwise block the event loop tearing them all down.
         for (const [, conn] of this.peerConnections) {
             this.options.chokeManager?.remove(conn);
             this.options.connectionBudget?.release();
             try { conn.destroy(); } catch { /* */ }
+            await yieldIfBlocked();
         }
         this.peerConnections.clear();
         this.peerMeta.clear();

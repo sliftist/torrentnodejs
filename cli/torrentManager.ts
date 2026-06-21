@@ -10,6 +10,7 @@ import { RateLimiter } from "../rateLimiter";
 import { ChokeManager } from "../chokeManager";
 import { ConnectionBudget } from "../connectionBudget";
 import { DialStats } from "../dialStats";
+import { yieldIfBlocked } from "../cooperativeYield";
 import { SchedulerSettings } from "./config";
 
 const STATE_FILENAME = "bittorrent.state.json";
@@ -210,11 +211,20 @@ export class TorrentManager extends EventEmitter {
     setMode(mode: RunMode): void {
         if (mode === this.mode) return;
         this.mode = mode;
-        for (const m of this.torrents.values()) {
-            void this.releaseTorrent(m);
-        }
         this.emit("notice", `Mode → ${mode}`);
         this.emit("update");
+        // Tearing down every torrent at once fires a synchronous burst of TCP
+        // RST sends (each a JS encrypt + native dgram send) with no IO awaits to
+        // break it up, freezing input/rendering — badly on Windows. Release them
+        // one at a time, yielding when we've blocked too long.
+        void this.tearDownAll();
+    }
+
+    private async tearDownAll(): Promise<void> {
+        for (const m of [...this.torrents.values()]) {
+            await this.releaseTorrent(m);
+            await yieldIfBlocked();
+        }
     }
 
     async start(): Promise<void> {
