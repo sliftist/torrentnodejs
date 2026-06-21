@@ -25,6 +25,12 @@ export interface TrackerAnnounceResult {
     leechers?: number;
 }
 
+export interface TrackerScrapeResult {
+    seeders: number;         // "complete"
+    completed: number;       // "downloaded" (lifetime completed downloads)
+    leechers: number;        // "incomplete"
+}
+
 export async function announceHttp(transport: Transport, trackerUrl: string, params: AnnounceParams): Promise<TrackerAnnounceResult> {
     const qs = [
         `info_hash=${urlEncodeBytes(params.infoHash)}`,
@@ -55,6 +61,51 @@ export async function announceHttp(transport: Transport, trackerUrl: string, par
     const seeders = typeof dict["complete"] === "number" ? dict["complete"] : undefined;
     const leechers = typeof dict["incomplete"] === "number" ? dict["incomplete"] : undefined;
     return { interval, minInterval, peers, seeders, leechers };
+}
+
+export async function scrapeHttp(transport: Transport, trackerUrl: string, infoHash: Buffer): Promise<TrackerScrapeResult> {
+    const scrapeUrl = deriveScrapeUrl(trackerUrl);
+    const sep = scrapeUrl.includes("?") && "&" || "?";
+    const url = `${scrapeUrl}${sep}info_hash=${urlEncodeBytes(infoHash)}`;
+    const res = await transport.fetch(url, { timeoutMs: 10_000 });
+    if (res.status !== 200) {
+        throw new Error(`Tracker scrape ${scrapeUrl} returned HTTP ${res.status}`);
+    }
+    const dict = decode(res.body) as BencodeDict;
+    const failure = dict["failure reason"];
+    if (Buffer.isBuffer(failure)) {
+        throw new Error(`Tracker scrape ${scrapeUrl} failure: ${failure.toString("utf8")}`);
+    }
+    const files = dict["files"];
+    if (!files || typeof files !== "object" || Buffer.isBuffer(files) || Array.isArray(files)) {
+        throw new Error(`Scrape response from ${scrapeUrl} missing "files" dict`);
+    }
+    // We scrape a single info_hash, so the files dict has one entry. Read it by
+    // value: its key is the raw 20-byte hash, which utf8 dict keys can't carry.
+    const entry = Object.values(files as BencodeDict)[0];
+    if (!entry || typeof entry !== "object" || Buffer.isBuffer(entry) || Array.isArray(entry)) {
+        throw new Error(`Scrape response from ${scrapeUrl} has no file entry`);
+    }
+    const e = entry as BencodeDict;
+    return {
+        seeders: typeof e["complete"] === "number" && e["complete"] || 0,
+        completed: typeof e["downloaded"] === "number" && e["downloaded"] || 0,
+        leechers: typeof e["incomplete"] === "number" && e["incomplete"] || 0,
+    };
+}
+
+// BEP 48: the scrape URL is the announce URL with the final path segment's
+// leading "announce" replaced by "scrape". A tracker whose path doesn't end in
+// "announce..." doesn't advertise scrape support.
+export function deriveScrapeUrl(announceUrl: string): string {
+    const u = new URL(announceUrl);
+    const slash = u.pathname.lastIndexOf("/");
+    const last = u.pathname.slice(slash + 1);
+    if (!last.startsWith("announce")) {
+        throw new Error(`Tracker ${announceUrl} does not support scrape (path "${u.pathname}")`);
+    }
+    u.pathname = u.pathname.slice(0, slash + 1) + "scrape" + last.slice("announce".length);
+    return u.toString();
 }
 
 export function parseCompactPeers(raw: BencodeValue | undefined): PeerAddress[] {

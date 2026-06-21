@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { Transport, UdpSocketLike } from "./transport";
-import { AnnounceParams, TrackerAnnounceResult, PeerAddress } from "./trackerHttp";
+import { AnnounceParams, TrackerAnnounceResult, TrackerScrapeResult, PeerAddress } from "./trackerHttp";
 
 // BEP 15. UDP trackers use a two-step protocol: first a connect (which returns
 // a 64-bit connection_id valid for ~60 s), then an announce that includes it.
@@ -8,10 +8,12 @@ import { AnnounceParams, TrackerAnnounceResult, PeerAddress } from "./trackerHtt
 const PROTOCOL_ID = 0x41727101980n;
 const ACTION_CONNECT = 0;
 const ACTION_ANNOUNCE = 1;
+const ACTION_SCRAPE = 2;
 const ACTION_ERROR = 3;
 
 const CONNECT_TIMEOUT_MS = 5_000;
 const ANNOUNCE_TIMEOUT_MS = 10_000;
+const SCRAPE_TIMEOUT_MS = 10_000;
 
 export async function announceUdp(transport: Transport, trackerUrl: string, params: AnnounceParams): Promise<TrackerAnnounceResult> {
     const u = new URL(trackerUrl);
@@ -28,6 +30,62 @@ export async function announceUdp(transport: Transport, trackerUrl: string, para
     } finally {
         sock.close();
     }
+}
+
+export async function scrapeUdp(transport: Transport, trackerUrl: string, infoHash: Buffer): Promise<TrackerScrapeResult> {
+    const u = new URL(trackerUrl);
+    const host = u.hostname;
+    const port = parseInt(u.port, 10);
+    if (!host || !Number.isFinite(port)) {
+        throw new Error(`Invalid UDP tracker URL "${trackerUrl}"`);
+    }
+    const destIP = await transport.resolve(host);
+    const sock = transport.openUdp();
+    try {
+        const connectionId = await udpConnect({ sock, destIP, destPort: port });
+        return await udpScrape({ sock, destIP, destPort: port, connectionId, infoHash });
+    } finally {
+        sock.close();
+    }
+}
+
+function udpScrape(opts: {
+    sock: UdpSocketLike;
+    destIP: string;
+    destPort: number;
+    connectionId: Buffer;
+    infoHash: Buffer;
+}): Promise<TrackerScrapeResult> {
+    const txId = crypto.randomBytes(4);
+    const req = Buffer.alloc(36);
+    opts.connectionId.copy(req, 0);
+    req.writeUInt32BE(ACTION_SCRAPE, 8);
+    txId.copy(req, 12);
+    opts.infoHash.copy(req, 16);
+
+    return new Promise<TrackerScrapeResult>((resolve, reject) => {
+        const cleanup = () => { clearTimeout(timer); opts.sock.off("message", onMessage); };
+        const timer = setTimeout(() => { cleanup(); reject(new Error(`UDP scrape to ${opts.destIP}:${opts.destPort} timed out`)); }, SCRAPE_TIMEOUT_MS);
+        const onMessage = (msg: Buffer) => {
+            if (msg.length < 8) return;
+            if (!msg.subarray(4, 8).equals(txId)) return;
+            const action = msg.readUInt32BE(0);
+            if (action === ACTION_ERROR) {
+                cleanup();
+                reject(new Error(`UDP tracker error: ${msg.subarray(8).toString("utf8")}`));
+                return;
+            }
+            if (action !== ACTION_SCRAPE) return;
+            if (msg.length < 20) { cleanup(); reject(new Error("Truncated UDP scrape response")); return; }
+            cleanup();
+            const seeders = msg.readUInt32BE(8);
+            const completed = msg.readUInt32BE(12);
+            const leechers = msg.readUInt32BE(16);
+            resolve({ seeders, completed, leechers });
+        };
+        opts.sock.on("message", onMessage);
+        opts.sock.send({ destIP: opts.destIP, destPort: opts.destPort, payload: req });
+    });
 }
 
 function udpConnect(opts: { sock: UdpSocketLike; destIP: string; destPort: number }): Promise<Buffer> {

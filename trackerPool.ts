@@ -1,7 +1,11 @@
 import { EventEmitter } from "events";
 import { Transport } from "./transport";
-import { AnnounceParams, TrackerAnnounceResult, PeerAddress, announceHttp } from "./trackerHttp";
-import { announceUdp } from "./trackerUdp";
+import { AnnounceParams, TrackerAnnounceResult, TrackerScrapeResult, PeerAddress, announceHttp, scrapeHttp } from "./trackerHttp";
+import { announceUdp, scrapeUdp } from "./trackerUdp";
+
+// Scrape carries no tracker-suggested interval, so we poll swarm stats on a
+// fixed, gentle cadence.
+const SCRAPE_INTERVAL_SEC = 120;
 
 export interface TrackerPoolOptions {
     transport: Transport;
@@ -9,6 +13,8 @@ export interface TrackerPoolOptions {
     params(): AnnounceParams;       // called freshly for each announce
     maxConsecutiveFailures?: number;
     minIntervalSec?: number;
+    // When true, only scrape swarm stats — never announce, never surface peers.
+    scrape?: boolean;
 }
 
 export interface TrackerStat {
@@ -57,7 +63,8 @@ export class TrackerPool extends EventEmitter {
                 continue;
             }
             this.statsByUrl.set(url, { url, status: "pending" });
-            this.inflight.push(this.runLoop(url));
+            if (this.opts.scrape) this.inflight.push(this.scrapeLoop(url));
+            else this.inflight.push(this.runLoop(url));
         }
     }
 
@@ -120,6 +127,43 @@ export class TrackerPool extends EventEmitter {
                 await this.interruptibleSleep(30_000);
             }
         }
+    }
+
+    private async scrapeLoop(url: string): Promise<void> {
+        let consecutiveFailures = 0;
+        while (!this.stopped) {
+            try {
+                const result = await this.scrapeOnce(url);
+                consecutiveFailures = 0;
+                this.statsByUrl.set(url, {
+                    url,
+                    status: "ok",
+                    seeders: result.seeders,
+                    leechers: result.leechers,
+                    peers: result.seeders + result.leechers,
+                    lastAnnounceMs: Date.now(),
+                });
+                this.emit("scrape", { url, ...result });
+                await this.interruptibleSleep(Math.max(this.minInterval, SCRAPE_INTERVAL_SEC) * 1000);
+            } catch (e) {
+                consecutiveFailures++;
+                this.statsByUrl.set(url, {
+                    url,
+                    status: "error",
+                    error: (e as Error).message,
+                    lastAnnounceMs: Date.now(),
+                });
+                this.emit("tracker-error", { url, error: e });
+                if (consecutiveFailures >= this.maxFails) return;
+                await this.interruptibleSleep(30_000);
+            }
+        }
+    }
+
+    private scrapeOnce(url: string): Promise<TrackerScrapeResult> {
+        const infoHash = this.opts.params().infoHash;
+        if (url.startsWith("udp://")) return scrapeUdp(this.opts.transport, url, infoHash);
+        return scrapeHttp(this.opts.transport, url, infoHash);
     }
 
     private announceOnce(url: string, event?: "started" | "stopped" | "completed"): Promise<TrackerAnnounceResult> {

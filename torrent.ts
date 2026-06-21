@@ -13,10 +13,11 @@ import { ConnectionBudget } from "./connectionBudget";
 
 // How many lifecycle phases the torrent actually runs:
 //  - "scan":    open + SHA-1 verify on-disk pieces only. No network at all.
-//  - "connect": scan, then announce + connect to peers to learn what pieces
-//               are available and what peers request — but never request or
-//               serve block data (no bytes transferred).
-//  - "full":    every phase — actually download and upload (default).
+//  - "connect": scan, then SCRAPE trackers for swarm stats (seeders/leechers/
+//               peers). It never announces, never dials or accepts peers, and
+//               transfers no data — just gathers swarm info before going full.
+//  - "full":    every phase — announce, connect to peers, download and upload
+//               (default).
 export type RunMode = "scan" | "connect" | "full";
 
 export interface TorrentOptions {
@@ -114,6 +115,8 @@ export class Torrent extends EventEmitter {
         this.tracker = new TrackerPool({
             transport: this.transport,
             trackers: config.meta.announceList,
+            // Connect mode gathers swarm stats without joining the swarm.
+            scrape: (config.options.mode ?? "full") === "connect",
             params: () => ({
                 infoHash: this.meta.infoHash,
                 peerId: this.peerId,
@@ -221,8 +224,19 @@ export class Torrent extends EventEmitter {
             if (this.pieceManager.isComplete()) this.emit("complete");
         }
 
+        const mode = this.options.mode ?? "full";
         // Scan-only mode stops here: drive checked, no network brought up.
-        if ((this.options.mode ?? "full") === "scan") return;
+        if (mode === "scan") return;
+
+        this.tracker.on("tracker-error", (e: { url: string; error: Error }) => this.emit("tracker-error", e));
+
+        // Connect mode only scrapes the trackers for swarm stats — no listener,
+        // no peer connections, no announce. Start the (scrape-configured) pool
+        // and stop.
+        if (mode === "connect") {
+            this.tracker.start();
+            return;
+        }
 
         // Inbound peers arrive through the single shared listener, demuxed by
         // info_hash. A standalone torrent without one simply can't be dialed.
@@ -231,7 +245,6 @@ export class Torrent extends EventEmitter {
         }
 
         this.tracker.on("peer", (p: PeerAddress) => this.tryAddPeer(p));
-        this.tracker.on("tracker-error", (e: { url: string; error: Error }) => this.emit("tracker-error", e));
         this.tracker.start();
 
         if (this.options.extraPeers) {
