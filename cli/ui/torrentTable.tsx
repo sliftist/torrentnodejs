@@ -1,7 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { TorrentView } from "../torrentManager";
-import { formatBytes, formatRate, formatPercent, progressBar, truncate } from "./format";
+import { TorrentSection, TorrentView } from "../torrentManager";
+import { formatRate, formatPercent, truncate } from "./format";
 
 const STATE_COLOR: Record<string, string> = {
     queued: "gray",
@@ -15,25 +15,50 @@ const STATE_COLOR: Record<string, string> = {
     error: "red",
 };
 
+const SECTION_COLOR: Record<string, string> = {
+    downloading: "cyan",
+    willDownload: "gray",
+    seeding: "green",
+    willSeed: "gray",
+};
+
+// One visible row in the flattened render: either a section heading or a torrent.
+type Row =
+    | { kind: "title"; section: TorrentSection; shown: number }
+    | { kind: "item"; view: TorrentView }
+    | { kind: "more"; count: number };
+
 export function TorrentTable(props: {
-    views: TorrentView[];
-    selectedIndex: number;
+    sections: TorrentSection[];
+    selectedHash?: string;
     width: number;
     height: number;
 }) {
-    const { views, selectedIndex, width, height } = props;
-    const rows = Math.max(1, height);
-
-    // Keep the selected row visible within the window.
-    let start = 0;
-    if (selectedIndex >= rows) start = selectedIndex - rows + 1;
-    const slice = views.slice(start, start + rows);
-
+    const { sections, selectedHash, width, height } = props;
     const nameWidth = Math.max(10, width - 54);
+    const total = sections.reduce((a, s) => a + s.items.length, 0);
 
-    if (views.length === 0) {
+    if (total === 0) {
         return <Text dimColor>No torrents. Drop .torrent files into a watched folder, or paste a folder path below.</Text>;
     }
+
+    // 1 line for the column header; the rest is split evenly across the four
+    // sections so the content above the list always stays on screen.
+    const bodyLines = Math.max(sections.length, height - 1);
+    const base = Math.floor(bodyLines / sections.length);
+    const extra = bodyLines % sections.length;
+
+    const rows: Row[] = [];
+    sections.forEach((section, i) => {
+        let sectionLines = base;
+        if (i < extra) sectionLines += 1;
+        if (sectionLines < 1) return;
+        const itemLines = sectionLines - 1; // one line for the title
+        const window = pickWindow(section.items, itemLines, selectedHash);
+        rows.push({ kind: "title", section, shown: window.items.length });
+        for (const v of window.items) rows.push({ kind: "item", view: v });
+        if (window.hiddenAfter > 0) rows.push({ kind: "more", count: window.hiddenAfter });
+    });
 
     return (
         <Box flexDirection="column" width={width}>
@@ -46,12 +71,30 @@ export function TorrentTable(props: {
                 <Box width={11}><Text dimColor bold>↑ rate</Text></Box>
                 <Text dimColor bold>peers</Text>
             </Box>
-            {slice.map((v, i) => {
-                const idx = start + i;
-                const selected = idx === selectedIndex;
+            {rows.map((row, idx) => {
+                if (row.kind === "title") {
+                    return (
+                        <Box key={`t-${row.section.key}`}>
+                            <Text bold color={SECTION_COLOR[row.section.key] || "white"}>
+                                {row.section.title}
+                            </Text>
+                            <Text dimColor>{`  (${row.section.items.length})`}</Text>
+                        </Box>
+                    );
+                }
+                if (row.kind === "more") {
+                    return (
+                        <Box key={`m-${idx}`}>
+                            <Box width={2}><Text> </Text></Box>
+                            <Text dimColor>{`… +${row.count} more`}</Text>
+                        </Box>
+                    );
+                }
+                const v = row.view;
+                const selected = v.infoHash === selectedHash;
                 return (
                     <Box key={v.infoHash}>
-                        <Box width={2}><Text color="cyan">{selected ? "›" : " "}</Text></Box>
+                        <Box width={2}><Text color="cyan">{selected && "›" || " "}</Text></Box>
                         <Box width={nameWidth}>
                             <Text bold={selected} inverse={selected}>{truncate(v.name, nameWidth - 1)}</Text>
                         </Box>
@@ -63,9 +106,27 @@ export function TorrentTable(props: {
                     </Box>
                 );
             })}
-            <Box marginTop={1}>
-                <Text dimColor>{`${views.length} torrent(s) · ${formatBytes(views.reduce((a, v) => a + v.sizeBytes, 0))} total`}</Text>
-            </Box>
         </Box>
     );
+}
+
+// Choose which slice of a section's items to render. Reserves the last line for
+// a "+N more" marker when items overflow, and scrolls to keep the selected
+// torrent visible if it lives in this section.
+function pickWindow(
+    items: TorrentView[],
+    itemLines: number,
+    selectedHash?: string,
+): { items: TorrentView[]; hiddenAfter: number } {
+    if (itemLines <= 0) return { items: [], hiddenAfter: items.length };
+    if (items.length <= itemLines) return { items, hiddenAfter: 0 };
+
+    const visible = itemLines - 1; // last line is the "+N more" marker
+    let start = 0;
+    const selIdx = items.findIndex((v) => v.infoHash === selectedHash);
+    if (selIdx >= 0) {
+        if (selIdx >= visible) start = selIdx - visible + 1;
+        if (start > items.length - visible) start = items.length - visible;
+    }
+    return { items: items.slice(start, start + visible), hiddenAfter: items.length - visible };
 }

@@ -45,14 +45,14 @@ async function main() {
     const loaded = await loadConfig(work);
     assert.strictEqual(loaded.downloadDir, downloadDir);
     assert.deepStrictEqual(loaded.sources, [sourceDir]);
-    assert.strictEqual(loaded.scheduler.maxActiveDownloads, DEFAULT_SCHEDULER.maxActiveDownloads);
+    assert.strictEqual(loaded.scheduler.downloadSlots, DEFAULT_SCHEDULER.downloadSlots);
     console.log("config roundtrip OK");
 
     // --- manager + watcher, scheduler disabled so nothing dials the network ---
     const manager = new TorrentManager({
         transport: stubTransport,
         downloadDir,
-        scheduler: { ...DEFAULT_SCHEDULER, maxActiveDownloads: 0, maxActiveSeeds: 0, maxActiveTotal: 0 },
+        scheduler: { ...DEFAULT_SCHEDULER, downloadSlots: 0, seedSlots: 0 },
         listenPortBase: 6881,
         stateDir: work,
     });

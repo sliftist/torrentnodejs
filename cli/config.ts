@@ -31,14 +31,15 @@ export function parseRunMode(arg: string | undefined): RunMode {
     throw new Error(`Unknown mode "${arg}". Expected one of: scan, connect, full.`);
 }
 
-// qBittorrent-style scheduler knobs. Defaults mirror its out-of-the-box caps.
+// Slot-based scheduler. A torrent occupies a download slot while it is being
+// checked or is incomplete, and a seed slot once it is complete. Slots also
+// bound how many torrents touch the disk/network at once, which keeps the
+// process well under its file-descriptor limit.
 export interface SchedulerSettings {
-    // Max torrents actively downloading at once.
-    maxActiveDownloads: number;
-    // Max torrents actively seeding (uploading) at once.
-    maxActiveSeeds: number;
-    // Overall cap on active (downloading + seeding) torrents.
-    maxActiveTotal: number;
+    // Max torrents checking or downloading at once.
+    downloadSlots: number;
+    // Max torrents seeding (uploading) at once.
+    seedSlots: number;
     // Per-torrent peer connection cap.
     maxPeersPerTorrent: number;
     // How often the source folders are rescanned for .torrent files (ms).
@@ -59,9 +60,8 @@ export interface Config {
 }
 
 export const DEFAULT_SCHEDULER: SchedulerSettings = {
-    maxActiveDownloads: 3,
-    maxActiveSeeds: 5,
-    maxActiveTotal: 8,
+    downloadSlots: 32,
+    seedSlots: 8,
     maxPeersPerTorrent: 40,
     watchIntervalMs: 3000,
 };

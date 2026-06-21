@@ -155,6 +155,8 @@ export class Torrent extends EventEmitter {
             // Resume: SHA-1-check what's on disk and adopt the valid pieces.
             const have = await this.storage.verifyExistingPieces(this.pieceManager.selected);
             this.pieceManager.markHaves(have);
+            // Promote any already-complete files out of the temp dir.
+            await this.storage.finalizeFiles(this.pieceManager.haveBitfield);
             if (this.pieceManager.isComplete()) this.emit("complete");
         }
 
@@ -301,6 +303,8 @@ export class Torrent extends EventEmitter {
         const result = this.pieceManager.addBlock(req, block, key);
         if (result.kind === "complete") {
             await this.storage.writePiece(index, result.piece);
+            // A finished piece may complete one or more files; move them into place.
+            await this.storage.finalizeFiles(this.pieceManager.haveBitfield);
             for (const c of this.peerConnections.values()) c.sendHave(index);
             this.emit("piece", index);
             if (this.pieceManager.isComplete()) this.emit("complete");

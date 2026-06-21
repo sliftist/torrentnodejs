@@ -2,8 +2,9 @@ import assert from "assert";
 import crypto from "crypto";
 import os from "os";
 import path from "path";
-import { mkdtemp, rm } from "fs/promises";
+import { mkdtemp, rm, stat } from "fs/promises";
 import { Storage } from "../storage";
+import { Bitfield } from "../bitfield";
 import { TorrentMeta } from "../torrentFile";
 
 function makeMetaFromData(data: Buffer, pieceLength: number): TorrentMeta {
@@ -54,6 +55,35 @@ export async function runStorageTests() {
         assert.ok(!have2.get(1), "corrupted piece 1 must not verify");
         assert.ok(have2.get(0) && have2.get(2) && have2.get(3), "intact pieces still verify");
         await s2.close();
+
+        // While in progress, nothing should sit in the save dir yet — the file
+        // lives in the temp dir until it's complete.
+        const preFinal = await stat(path.join(dir, "blob.bin")).catch(() => undefined);
+        assert.ok(!preFinal, "incomplete file must not appear in the save dir");
+
+        // Re-write every piece correctly, finalize, and confirm the file is
+        // renamed into the save dir and still reads back.
+        const s3 = new Storage(meta, dir);
+        await s3.open();
+        for (let i = 0; i < meta.pieceHashes.length; i++) {
+            const piece = data.subarray(i * pieceLength, Math.min((i + 1) * pieceLength, data.length));
+            await s3.writePiece(i, piece);
+        }
+        const complete = new Bitfield(meta.pieceHashes.length);
+        for (let i = 0; i < meta.pieceHashes.length; i++) complete.set(i);
+        await s3.finalizeFiles(complete);
+        const finalStat = await stat(path.join(dir, "blob.bin"));
+        assert.strictEqual(finalStat.size, data.length, "finalized file is full size in the save dir");
+        const postBlock = await s3.readBlock(0, 100, 256);
+        assert.ok(postBlock.equals(data.subarray(100, 356)), "reads work after finalize");
+        await s3.close();
+
+        // A fresh Storage sees the finished file as complete with no temp dir.
+        const s4 = new Storage(meta, dir);
+        await s4.open();
+        const have4 = await s4.verifyExistingPieces();
+        assert.strictEqual(have4.popcount(), meta.pieceHashes.length, "finalized file verifies on reopen");
+        await s4.close();
     } finally {
         await rm(dir, { recursive: true, force: true });
     }
