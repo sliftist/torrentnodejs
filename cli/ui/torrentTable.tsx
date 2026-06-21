@@ -21,9 +21,11 @@ const STATE_COLOR: Record<string, string> = {
 const STATE_LABEL: Record<string, string> = {
     downloading: "down",
     corrupted: "corrupt",
+    checking: "verify",
 };
 
 const SECTION_COLOR: Record<string, string> = {
+    verifying: "blue",
     downloading: "cyan",
     downloadingQueued: "gray",
     downloadingNoPeers: "gray",

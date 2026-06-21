@@ -38,9 +38,10 @@ export function Header(props: { agg: AggregateView; localIP: string; width: numb
                 <Text color="red">{`failed ${formatNumber(agg.dialFailures)} · ${formatNumber(agg.dialFailRate)}/s`}</Text>
             </Box>
             <Box>
-                <Text color="cyan">{`↓ ${formatRate(agg.downRate)}  `}</Text>
-                <Text color="green">{`↑ ${formatRate(agg.upRate)}   `}</Text>
-                <Text dimColor>{`total ↓${formatBytes(agg.downloadedBytes)} ↑${formatBytes(agg.uploadedBytes)}`}</Text>
+                <Text dimColor>disk </Text>
+                <Text color="cyan">{`read ${formatRate(agg.diskReadRate)}  `}</Text>
+                <Text color="green">{`write ${formatRate(agg.diskWriteRate)}   `}</Text>
+                <Text dimColor>{`total r ${formatBytes(agg.diskBytesRead)} w ${formatBytes(agg.diskBytesWritten)}`}</Text>
             </Box>
             <Box>
                 <Text dimColor>tunnel </Text>

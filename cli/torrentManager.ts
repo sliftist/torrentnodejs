@@ -10,6 +10,7 @@ import { RateLimiter } from "../rateLimiter";
 import { ChokeManager } from "../chokeManager";
 import { ConnectionBudget } from "../connectionBudget";
 import { DialStats } from "../dialStats";
+import { diskIO } from "../storage";
 import { yieldIfBlocked } from "../cooperativeYield";
 import { SchedulerSettings } from "./config";
 
@@ -69,9 +70,10 @@ export interface TorrentView {
 }
 
 // The four lists from the spec.
-export type SectionKey = "downloading" | "seeding" | "downloadingQueued" | "downloadingNoPeers" | "seedingIdle";
+export type SectionKey = "verifying" | "downloading" | "seeding" | "downloadingQueued" | "downloadingNoPeers" | "seedingIdle";
 
 export const SECTION_TITLES: Record<SectionKey, string> = {
+    verifying: "verifying (hashing on-disk data)",
     downloading: "downloading actively",
     seeding: "seeding actively",
     downloadingQueued: "downloading but queued (no free slot)",
@@ -79,7 +81,7 @@ export const SECTION_TITLES: Record<SectionKey, string> = {
     seedingIdle: "seeding, but no one has downloaded for the last minute",
 };
 
-export const SECTION_ORDER: SectionKey[] = ["downloading", "seeding", "downloadingQueued", "downloadingNoPeers", "seedingIdle"];
+export const SECTION_ORDER: SectionKey[] = ["verifying", "downloading", "seeding", "downloadingQueued", "downloadingNoPeers", "seedingIdle"];
 
 export interface TorrentSection {
     key: SectionKey;
@@ -112,6 +114,14 @@ export interface AggregateView {
     dialFailures: number;
     dialAttemptRate: number;
     dialFailRate: number;
+    // Actual file-I/O: cumulative bytes read/written to disk and the smoothed
+    // per-second rate. Reads include hash verification; writes include block
+    // downloads. Distinct from network transfer — disk activity happens during a
+    // scan with no peers at all.
+    diskBytesRead: number;
+    diskBytesWritten: number;
+    diskReadRate: number;
+    diskWriteRate: number;
 }
 
 export interface TorrentDetail {
@@ -200,6 +210,11 @@ export class TorrentManager extends EventEmitter {
     private lastWireReceived = 0;
     private wireSendRate = 0;
     private wireRecvRate = 0;
+    // Disk-I/O rate sampling (EMA), from the global storage counters.
+    private lastDiskRead = 0;
+    private lastDiskWritten = 0;
+    private diskReadRate = 0;
+    private diskWriteRate = 0;
     // Trailing 60-second samples of cumulative dial counters, for the per-second
     // rate. One sample per tick (~1s); entries older than 60s are dropped.
     private dialSamples: { t: number; attempts: number; failures: number }[] = [];
@@ -551,6 +566,10 @@ export class TorrentManager extends EventEmitter {
             dialFailures: this.dialStats?.failures ?? 0,
             dialAttemptRate: this.dialAttemptRate,
             dialFailRate: this.dialFailRate,
+            diskBytesRead: diskIO.bytesRead,
+            diskBytesWritten: diskIO.bytesWritten,
+            diskReadRate: this.diskReadRate,
+            diskWriteRate: this.diskWriteRate,
         };
     }
 
@@ -582,7 +601,7 @@ export class TorrentManager extends EventEmitter {
 
     sections(): TorrentSection[] {
         const buckets: Record<SectionKey, ManagedTorrent[]> = {
-            downloading: [], seeding: [], downloadingQueued: [], downloadingNoPeers: [], seedingIdle: [],
+            verifying: [], downloading: [], seeding: [], downloadingQueued: [], downloadingNoPeers: [], seedingIdle: [],
         };
         for (const m of this.torrents.values()) buckets[this.sectionOf(m)].push(m);
         return SECTION_ORDER.map((key) => ({
@@ -597,6 +616,9 @@ export class TorrentManager extends EventEmitter {
     // ---- internals ----
 
     private sectionOf(m: ManagedTorrent): SectionKey {
+        // A torrent whose instance exists but hasn't finished starting is still
+        // hashing its on-disk data — it can't transfer until that completes.
+        if (m.torrent && !m.started && !m.paused && !m.error) return "verifying";
         const complete = this.isComplete(m);
         if (complete) {
             if (m.torrent && this.uploadedRecently(m)) return "seeding";
@@ -710,7 +732,10 @@ export class TorrentManager extends EventEmitter {
 
         for (const m of this.torrents.values()) {
             const t = m.torrent;
-            if (!t) {
+            // A torrent that's only verifying (not yet started) isn't downloading.
+            // Decay its rate and skip — verification reads show up as disk I/O,
+            // not as a download.
+            if (!t || !m.started) {
                 m.downRate *= 1 - RATE_ALPHA;
                 m.upRate *= 1 - RATE_ALPHA;
                 continue;
@@ -748,6 +773,13 @@ export class TorrentManager extends EventEmitter {
             this.lastWireSent = wire.bytesSent;
             this.lastWireReceived = wire.bytesReceived;
         }
+
+        const rInstDisk = Math.max(0, diskIO.bytesRead - this.lastDiskRead) / dt;
+        const wInstDisk = Math.max(0, diskIO.bytesWritten - this.lastDiskWritten) / dt;
+        this.diskReadRate = RATE_ALPHA * rInstDisk + (1 - RATE_ALPHA) * this.diskReadRate;
+        this.diskWriteRate = RATE_ALPHA * wInstDisk + (1 - RATE_ALPHA) * this.diskWriteRate;
+        this.lastDiskRead = diskIO.bytesRead;
+        this.lastDiskWritten = diskIO.bytesWritten;
 
         if (this.dialStats) {
             this.dialSamples.push({ t: now, attempts: this.dialStats.attempts, failures: this.dialStats.failures });
@@ -874,6 +906,12 @@ export class TorrentManager extends EventEmitter {
                 m.started = true;
                 m.starting = false;
                 m.knownProgress = t.progress;
+                // Baseline the rate counters at the post-verification byte counts
+                // so the pieces we already had on disk aren't counted as a sudden
+                // download on the next tick.
+                m.lastDown = t.downloadedBytes;
+                m.lastUp = t.uploadedBytes;
+                m.lastProgressBytes = t.downloadedBytes;
                 // A torrent prioritized before it started gets its half-rate
                 // limiter now that the instance exists.
                 this.applyLimiter(m);

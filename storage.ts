@@ -36,6 +36,11 @@ interface CheckedCache {
 const CHECKED_CACHE_DIR = ".bittorrent-checked";
 const CHECKED_CACHE_VERSION = 1;
 
+// Process-wide disk I/O byte counters, sampled by the UI to show an actual
+// file-I/O throughput. Incremented by every real read/write of file data
+// (verification reads, block writes, upload reads) — not by allocation.
+export const diskIO = { bytesRead: 0, bytesWritten: 0 };
+
 // Drive-letter (C:\ or C:/) prefix — used to keep the temp dir on the same
 // volume as the final files so the completion rename never crosses devices.
 const WINDOWS_DRIVE = /^([A-Za-z]):[\\/]/;
@@ -281,6 +286,7 @@ export class Storage {
             const handle = await open(this.activePath(plan), fsConstants.O_RDWR | fsConstants.O_CREAT, 0o644);
             try {
                 await handle.write(data, dataOffset, sliceLength, fileOffset);
+                diskIO.bytesWritten += sliceLength;
             } finally {
                 await handle.close();
             }
@@ -312,6 +318,7 @@ export class Storage {
                 if (!handle) continue;
                 try {
                     await handle.read(out, outOffset, avail, fileOffset);
+                    diskIO.bytesRead += avail;
                 } finally {
                     await handle.close();
                 }
@@ -323,6 +330,7 @@ export class Storage {
             const handle = await open(this.activePath(plan), fsConstants.O_RDONLY);
             try {
                 await handle.read(out, outOffset, sliceLength, fileOffset);
+                diskIO.bytesRead += sliceLength;
             } finally {
                 await handle.close();
             }
