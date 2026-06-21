@@ -1,7 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { TorrentSection, TorrentView } from "../torrentManager";
-import { formatRate, formatPercent, formatEta, formatNumber, truncate } from "./format";
+import { formatRate, formatPercent, formatEta, formatNumber, formatBytes, formatDateTime, truncate } from "./format";
 
 const STATE_COLOR: Record<string, string> = {
     queued: "gray",
@@ -44,7 +44,7 @@ export function TorrentTable(props: {
     height: number;
 }) {
     const { sections, selectedHash, width, height } = props;
-    const nameWidth = Math.max(10, width - 77);
+    const nameWidth = Math.max(10, width - 117);
     const total = sections.reduce((a, s) => a + s.items.length, 0);
 
     if (total === 0) {
@@ -76,12 +76,16 @@ export function TorrentTable(props: {
                 <Box width={nameWidth}><Text dimColor bold>name</Text></Box>
                 <Box width={8}><Text dimColor bold>state</Text></Box>
                 <Box width={7}><Text dimColor bold>prog</Text></Box>
+                <Box width={9}><Text dimColor bold>size</Text></Box>
+                <Box width={7}><Text dimColor bold>chunks</Text></Box>
                 <Box width={9}><Text dimColor bold>↓ rate</Text></Box>
                 <Box width={9}><Text dimColor bold>↑ rate</Text></Box>
                 <Box width={15}><Text dimColor bold>conn/seed/all</Text></Box>
                 <Box width={7}><Text dimColor bold>dn/up</Text></Box>
                 <Box width={8}><Text dimColor bold>eta</Text></Box>
                 <Box width={6}><Text dimColor bold>ratio</Text></Box>
+                <Box width={12}><Text dimColor bold>started</Text></Box>
+                <Box width={12}><Text dimColor bold>finished</Text></Box>
                 <Text dimColor bold>trk</Text>
             </Box>
             {rows.map((row, idx) => {
@@ -113,12 +117,16 @@ export function TorrentTable(props: {
                         </Box>
                         <Box width={8}><Text color={STATE_COLOR[v.state] || "white"}>{STATE_LABEL[v.state] || v.state}</Text></Box>
                         <Box width={7}><Text>{formatPercent(v.progress)}</Text></Box>
+                        <Box width={9}><Text>{formatBytes(v.sizeBytes)}</Text></Box>
+                        <Box width={7}><Text>{String(v.pieceCount)}</Text></Box>
                         <Box width={9}><Text color="cyan">{formatRate(v.downRate)}</Text></Box>
                         <Box width={9}><Text color="green">{formatRate(v.upRate)}</Text></Box>
                         <Box width={15}><Text>{`${v.connectedPeers}/${formatNumber(v.seeders)}/${formatNumber(v.swarmPeers)}`}</Text></Box>
                         <Box width={7}><Text>{`${v.peersUnchokingUs}↓/${v.peersWeUnchoked}↑`}</Text></Box>
                         <Box width={8}><Text>{v.progress >= 1 && "—" || formatEta(v.etaSeconds)}</Text></Box>
                         <Box width={6}><Text>{v.ratio.toFixed(2)}</Text></Box>
+                        <Box width={12}><Text dimColor>{formatDateTime(v.startedAtMs)}</Text></Box>
+                        <Box width={12}><Text dimColor>{formatDateTime(v.finishedAtMs)}</Text></Box>
                         <Text>{`${v.trackersResponding}/${v.trackersTotal}`}</Text>
                     </Box>
                 );

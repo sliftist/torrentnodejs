@@ -47,6 +47,15 @@ export function formatEta(seconds: number): string {
     return `${d}d ${h % 24}h`;
 }
 
+// Compact local "MM-DD HH:mm" timestamp from epoch milliseconds; "—" when the
+// time is unknown (0 / not yet determined).
+export function formatDateTime(ms: number): string {
+    if (!ms || !isFinite(ms)) return "—";
+    const d = new Date(ms);
+    const p = (n: number) => n.toString().padStart(2, "0");
+    return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 // Normalize for filtering: keep only [a-z0-9], lowercased. Spaces and special
 // characters are dropped so "Big Buck Bunny!" matches "bigbuck".
 export function normalizeForFilter(s: string): string {

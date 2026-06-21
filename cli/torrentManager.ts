@@ -1,7 +1,7 @@
 import { EventEmitter } from "events";
 import crypto from "crypto";
 import path from "path";
-import { readFile, writeFile } from "fs/promises";
+import { readFile, writeFile, stat } from "fs/promises";
 import { Transport } from "../transport";
 import { Torrent, RunMode } from "../torrent";
 import { TorrentMeta, parseTorrentFile, pieceLengthAt } from "../torrentFile";
@@ -61,6 +61,11 @@ export interface TorrentView {
     error?: string;
     sourcePath: string;
     creationDate: number;
+    pieceCount: number;
+    // Estimated start: filesystem creation/modified time of the source .torrent.
+    // Estimated finish: latest modified time across the output files. 0 = unknown.
+    startedAtMs: number;
+    finishedAtMs: number;
 }
 
 // The four lists from the spec.
@@ -146,6 +151,12 @@ interface ManagedTorrent {
     lastUp: number;
     downRate: number;
     upRate: number;
+    // Estimated start (source .torrent file time) and finish (latest output file
+    // mtime), both epoch ms; 0 until determined. finishedChecking guards the
+    // async output stat from running concurrently.
+    startedAtMs: number;
+    finishedAtMs: number;
+    finishedChecking: boolean;
 }
 
 export interface TorrentManagerOptions {
@@ -287,6 +298,10 @@ export class TorrentManager extends EventEmitter {
         this.bySource.set(sourcePath, infoHash);
         if (this.torrents.has(infoHash)) return;
         const now = Date.now();
+        // Estimate the start time from the source .torrent file's creation time
+        // (or its modified time where the platform doesn't track creation).
+        const srcStat = await stat(sourcePath).catch(() => undefined);
+        const startedAtMs = srcStat ? (srcStat.birthtimeMs || srcStat.mtimeMs) : 0;
         this.torrents.set(infoHash, {
             infoHash,
             name: meta.name,
@@ -307,6 +322,9 @@ export class TorrentManager extends EventEmitter {
             lastUp: 0,
             downRate: 0,
             upRate: 0,
+            startedAtMs,
+            finishedAtMs: 0,
+            finishedChecking: false,
         });
         this.emit("update");
     }
@@ -582,6 +600,23 @@ export class TorrentManager extends EventEmitter {
         return p >= 1;
     }
 
+    // Estimate when the download finished from the latest modified time across
+    // its output files. Runs once per torrent (guarded), result cached on m.
+    private async captureFinishedAt(m: ManagedTorrent): Promise<void> {
+        if (m.finishedChecking || m.finishedAtMs) return;
+        m.finishedChecking = true;
+        try {
+            let latest = 0;
+            for (const f of m.meta.files) {
+                const s = await stat(path.join(this.downloadDir, ...f.path)).catch(() => undefined);
+                if (s && s.mtimeMs > latest) latest = s.mtimeMs;
+            }
+            if (latest > 0) m.finishedAtMs = latest;
+        } finally {
+            m.finishedChecking = false;
+        }
+    }
+
     private toView(m: ManagedTorrent): TorrentView {
         const t = m.torrent;
         const size = m.meta.totalLength;
@@ -619,6 +654,9 @@ export class TorrentManager extends EventEmitter {
             error: m.error,
             sourcePath: m.sourcePath,
             creationDate: m.meta.creationDate ?? 0,
+            pieceCount: m.meta.pieceHashes.length,
+            startedAtMs: m.startedAtMs,
+            finishedAtMs: m.finishedAtMs,
         };
     }
 
@@ -675,6 +713,9 @@ export class TorrentManager extends EventEmitter {
                 m.lastUploadBytes = up;
                 m.lastUploadAtMs = now;
             }
+            // Once complete, estimate the finish time from the output files'
+            // modified time (computed once, then cached).
+            if (!m.finishedAtMs && this.isComplete(m)) void this.captureFinishedAt(m);
         }
 
         const wire = this.transport.trafficStats?.();
