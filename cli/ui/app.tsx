@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { statSync } from "fs";
-import { TorrentManager } from "../torrentManager";
+import { TorrentManager, TorrentView } from "../torrentManager";
 import { SourceWatcher } from "../watcher";
 import { normalizeForFilter, truncate } from "./format";
 import { cleanPathInput, RUN_MODES, RunMode } from "../config";
@@ -17,11 +17,19 @@ export interface AppProps {
     onAddSource: (folder: string) => void;
 }
 
-type Mode = "list" | "detail";
+type View = "list" | "detail";
+// Transient input surfaces drawn over the footer. "none" is the resting state.
+type Overlay = "none" | "actions" | "filter" | "addFolder";
+
+interface Action {
+    label: string;
+    run: () => void;
+}
 
 // Cap UI redraws to ~14 fps. Coalesces bursts of manager "update" events into a
 // single render so input stays responsive during mass torrent state changes.
 const RENDER_THROTTLE_MS = 70;
+const MENU_WIDTH = 36;
 
 export function App(props: AppProps) {
     const { manager, watcher, localIP, onAddSource } = props;
@@ -30,8 +38,11 @@ export function App(props: AppProps) {
 
     const [, setTick] = useState(0);
     const [dims, setDims] = useState({ cols: stdout?.columns || 80, rows: stdout?.rows || 24 });
-    const [mode, setMode] = useState<Mode>("list");
+    const [view, setView] = useState<View>("list");
+    const [overlay, setOverlay] = useState<Overlay>("none");
     const [filter, setFilter] = useState("");
+    const [folderDraft, setFolderDraft] = useState("");
+    const [actionIndex, setActionIndex] = useState(0);
     const [selectedIndex, setSelectedIndex] = useState(0);
     const [selectedHash, setSelectedHash] = useState<string | undefined>(undefined);
     const [tab, setTab] = useState<DetailTab>("general");
@@ -80,71 +91,154 @@ export function App(props: AppProps) {
     }));
     // Flatten in section order for keyboard navigation.
     const views = sections.flatMap((s) => s.items);
+    // Flat index where each non-empty section begins, for PgUp/PgDn jumps.
+    const sectionStarts: number[] = [];
+    {
+        let acc = 0;
+        for (const s of sections) {
+            if (s.items.length === 0) continue;
+            sectionStarts.push(acc);
+            acc += s.items.length;
+        }
+    }
 
     // Clamp selection to the filtered list.
     const clampedIndex = Math.min(selectedIndex, Math.max(0, views.length - 1));
     if (clampedIndex !== selectedIndex) setSelectedIndex(clampedIndex);
     const selected = views[clampedIndex];
 
+    const detail = view === "detail" && selectedHash ? manager.detail(selectedHash) : undefined;
+    const detailViewModel = view === "detail" && selectedHash
+        ? views.find((v) => v.infoHash === selectedHash) ?? allViews.find((v) => v.infoHash === selectedHash)
+        : undefined;
+    // The torrent that context actions (pause, open) apply to.
+    const focusTorrent = view === "detail" ? detailViewModel : selected;
+
+    function openDetail(v: TorrentView): void {
+        setSelectedHash(v.infoHash);
+        setView("detail");
+        setTab("general");
+        setScroll(0);
+        setOverlay("none");
+    }
+
+    function jumpSection(dir: 1 | -1): void {
+        if (sectionStarts.length === 0) return;
+        let cur = 0;
+        for (let i = 0; i < sectionStarts.length; i++) {
+            if (sectionStarts[i] <= clampedIndex) cur = i;
+        }
+        const next = Math.min(sectionStarts.length - 1, Math.max(0, cur + dir));
+        setSelectedIndex(sectionStarts[next]);
+    }
+
+    // Built fresh each render so labels (Pause/Resume, current mode) stay live.
+    // Future operations (e.g. "Show web password") slot in as new entries here.
+    function buildActions(): Action[] {
+        const acts: Action[] = [];
+        if (focusTorrent) {
+            const f = focusTorrent;
+            if (view === "list") acts.push({ label: "Open details", run: () => openDetail(f) });
+            const paused = f.state === "paused";
+            acts.push({
+                label: paused ? "Resume" : "Pause",
+                run: () => { setOverlay("none"); void manager.togglePause(f.infoHash); },
+            });
+        }
+        acts.push({ label: "Add folder…", run: () => { setFolderDraft(""); setOverlay("addFolder"); } });
+        acts.push({
+            label: `Switch mode (now: ${manager.runMode})`,
+            run: () => { setOverlay("none"); manager.setMode(nextRunMode(manager.runMode)); },
+        });
+        return acts;
+    }
+    const actions = buildActions();
+
     useInput((input, key) => {
         if (key.ctrl && input === "c") { exit(); return; }
 
-        if (mode === "detail") {
-            if (key.escape) { setMode("list"); setScroll(0); return; }
-            if (key.tab || key.rightArrow) { setTab(nextTab(tab, 1)); setScroll(0); return; }
-            if (key.leftArrow) { setTab(nextTab(tab, -1)); setScroll(0); return; }
-            if (key.upArrow) { setScroll((s) => Math.max(0, s - 1)); return; }
-            if (key.downArrow) { setScroll((s) => s + 1); return; }
-            if (input === "p" && selectedHash) { void manager.togglePause(selectedHash); return; }
-            if (input === "q") { setMode("list"); setScroll(0); return; }
+        if (overlay === "filter") {
+            if (key.escape) { setFilter(""); setOverlay("none"); return; }
+            if (key.return) { setOverlay("none"); return; }
+            if (key.backspace || key.delete) { setFilter((f) => f.slice(0, -1)); return; }
+            if (input && !key.ctrl && !key.meta) setFilter((f) => f + input);
             return;
         }
 
-        // list mode
+        if (overlay === "addFolder") {
+            if (key.escape) { setFolderDraft(""); setOverlay("none"); return; }
+            if (key.return) {
+                const candidate = cleanPathInput(folderDraft);
+                if (candidate && isDirectory(candidate)) {
+                    onAddSource(candidate);
+                    setNotice(`Watching ${candidate}`);
+                    setFolderDraft("");
+                    setOverlay("none");
+                } else {
+                    setNotice(`Not a folder: ${candidate || "(empty)"}`);
+                }
+                return;
+            }
+            if (key.backspace || key.delete) { setFolderDraft((f) => f.slice(0, -1)); return; }
+            if (input && !key.ctrl && !key.meta) setFolderDraft((f) => f + input);
+            return;
+        }
+
+        if (overlay === "actions") {
+            if (key.escape || key.leftArrow) { setOverlay("none"); return; }
+            if (key.upArrow) { setActionIndex((i) => Math.max(0, i - 1)); return; }
+            if (key.downArrow) { setActionIndex((i) => Math.min(actions.length - 1, i + 1)); return; }
+            if (key.return) { actions[Math.min(actionIndex, actions.length - 1)]?.run(); return; }
+            return;
+        }
+
+        // Resting state: shared keys first.
+        if (input === "a") { setActionIndex(0); setOverlay("actions"); return; }
+        if (input === "/") { setOverlay("filter"); return; }
+
+        if (view === "detail") {
+            if (key.leftArrow || key.escape || input === "q") { setView("list"); setScroll(0); return; }
+            if (key.tab && key.shift) { setTab(nextTab(tab, -1)); setScroll(0); return; }
+            if (key.tab) { setTab(nextTab(tab, 1)); setScroll(0); return; }
+            if (key.upArrow) { setScroll((s) => Math.max(0, s - 1)); return; }
+            if (key.downArrow) { setScroll((s) => s + 1); return; }
+            if (input === "p" && focusTorrent) { void manager.togglePause(focusTorrent.infoHash); return; }
+            return;
+        }
+
+        // list view
         if (key.tab) { manager.setMode(nextRunMode(manager.runMode)); return; }
         if (key.upArrow) { setSelectedIndex((i) => Math.max(0, i - 1)); return; }
         if (key.downArrow) { setSelectedIndex((i) => Math.min(views.length - 1, i + 1)); return; }
-        if (key.escape) { setFilter(""); return; }
-        if (key.backspace || key.delete) { setFilter((f) => f.slice(0, -1)); return; }
-        if (key.return) {
-            const candidate = cleanPathInput(filter);
-            if (candidate && isDirectory(candidate)) {
-                onAddSource(candidate);
-                setNotice(`Watching ${candidate}`);
-                setFilter("");
-                return;
-            }
-            if (selected) {
-                setSelectedHash(selected.infoHash);
-                setMode("detail");
-                setTab("general");
-                setScroll(0);
-            }
-            return;
-        }
-        // Printable input (includes pasted text) extends the filter / path.
-        if (input && !key.ctrl && !key.meta) setFilter((f) => f + input);
+        if (key.pageUp) { jumpSection(-1); return; }
+        if (key.pageDown) { jumpSection(1); return; }
+        if (key.rightArrow || key.return) { if (selected) openDetail(selected); return; }
+        if (key.escape && filter) { setFilter(""); return; }
     });
 
     const width = dims.cols;
-    const detail = mode === "detail" && selectedHash ? manager.detail(selectedHash) : undefined;
-    const detailViewModel = mode === "detail" && selectedHash ? views.find((v) => v.infoHash === selectedHash) ?? allViews.find((v) => v.infoHash === selectedHash) : undefined;
     const bodyHeight = Math.max(4, dims.rows - 9);
+
+    let body: React.ReactNode;
+    if (view === "detail" && detail && detailViewModel) {
+        body = <DetailView view={detailViewModel} detail={detail} tab={tab} scroll={scroll} width={width} height={bodyHeight} />;
+    } else {
+        body = <TorrentTable sections={sections} selectedHash={selected?.infoHash} width={width} height={bodyHeight} />;
+    }
 
     return (
         <Box flexDirection="column" width={width}>
             <Header agg={manager.aggregate()} localIP={localIP} width={width} mode={manager.runMode} />
             <Box flexDirection="column" flexGrow={1} marginTop={1}>
-                {mode === "detail" && detail && detailViewModel ? (
-                    <DetailView view={detailViewModel} detail={detail} tab={tab} scroll={scroll} width={width} height={bodyHeight} />
-                ) : (
-                    <TorrentTable sections={sections} selectedHash={selected?.infoHash} width={width} height={bodyHeight} />
-                )}
+                {body}
             </Box>
+            {overlay === "actions" && <ActionsMenu actions={actions} index={actionIndex} />}
             <Footer
                 width={width}
-                mode={mode}
+                view={view}
+                overlay={overlay}
                 filter={filter}
+                folderDraft={folderDraft}
                 folders={watcher.watchedFolders}
                 notice={notice}
             />
@@ -152,33 +246,81 @@ export function App(props: AppProps) {
     );
 }
 
-function Footer(props: { width: number; mode: Mode; filter: string; folders: string[]; notice: string }) {
-    const { width, mode, filter, folders, notice } = props;
+function ActionsMenu(props: { actions: Action[]; index: number }) {
+    const { actions, index } = props;
+    return (
+        <Box flexDirection="column" width={MENU_WIDTH} borderStyle="round" borderColor="cyan" paddingX={1}>
+            <Text bold color="cyan">Actions</Text>
+            {actions.map((a, i) => {
+                const active = i === index;
+                return (
+                    <Text key={a.label} color={active && "black" || "white"} backgroundColor={active && "cyan" || undefined}>
+                        {(active && "› " || "  ") + a.label}
+                    </Text>
+                );
+            })}
+            <Text dimColor>↑↓ select · Enter run · Esc close</Text>
+        </Box>
+    );
+}
+
+function Footer(props: {
+    width: number;
+    view: View;
+    overlay: Overlay;
+    filter: string;
+    folderDraft: string;
+    folders: string[];
+    notice: string;
+}) {
+    const { width, view, overlay, filter, folderDraft, folders, notice } = props;
+
+    let topLine: React.ReactNode;
+    if (overlay === "filter") {
+        topLine = (
+            <Box>
+                <Text color="cyan">filter › </Text>
+                <Text>{filter}</Text>
+                <Text inverse> </Text>
+                <Text dimColor>  (Enter apply · Esc clear)</Text>
+            </Box>
+        );
+    } else if (overlay === "addFolder") {
+        topLine = (
+            <Box>
+                <Text color="cyan">add folder › </Text>
+                <Text>{folderDraft}</Text>
+                <Text inverse> </Text>
+                <Text dimColor>  (Enter add · Esc cancel)</Text>
+            </Box>
+        );
+    } else {
+        topLine = (
+            <Box>
+                <Text dimColor>{hintFor(view)}</Text>
+                {Boolean(filter) && <Text color="yellow">{`   filter: ${truncate(filter, 20)}`}</Text>}
+            </Box>
+        );
+    }
+
+    const sourcesLine = folders.length > 0
+        && `sources: ${truncate(folders.join("  "), width - 16)}`
+        || "no source folders — press a → Add folder";
+
     return (
         <Box flexDirection="column" width={width} borderStyle="round" borderColor="gray" paddingX={1}>
+            {topLine}
             <Box>
-                <Text dimColor>sources: </Text>
-                <Text>{folders.length ? truncate(folders.join("  "), width - 12) : "(none — paste a folder path)"}</Text>
-            </Box>
-            {mode === "list" ? (
-                <Box>
-                    <Text color="cyan">filter/path › </Text>
-                    <Text>{filter}</Text>
-                    <Text inverse> </Text>
-                </Box>
-            ) : (
-                <Box><Text dimColor>Tab/←→ switch view · ↑↓ scroll · p pause · Esc back · Ctrl+C quit</Text></Box>
-            )}
-            <Box>
-                <Text dimColor>
-                    {mode === "list"
-                        ? "type to filter · paste a folder path + Enter to watch · ↑↓ select · Enter open · Tab cycle mode · Ctrl+C quit"
-                        : ""}
-                </Text>
-                {notice ? <Text color="yellow">  {truncate(notice, width - 4)}</Text> : null}
+                <Text dimColor>{sourcesLine}</Text>
+                {Boolean(notice) && <Text color="yellow">{`   ${truncate(notice, width - 4)}`}</Text>}
             </Box>
         </Box>
     );
+}
+
+function hintFor(view: View): string {
+    if (view === "detail") return "Tab/⇧Tab tabs · ↑↓ scroll · a actions · ← back · ^C quit";
+    return "↑↓ select · → open · PgUp/PgDn section · / filter · a actions · Tab mode · ^C quit";
 }
 
 function nextRunMode(current: RunMode): RunMode {

@@ -28,7 +28,7 @@ export function DetailView(props: {
                         {` ${t} `}
                     </Text>
                 ))}
-                <Text dimColor>  (Tab/←→ switch · ↑↓ scroll · p pause · Esc back)</Text>
+                <Text dimColor>  (Tab/⇧Tab tabs · ↑↓ scroll · a actions · ← back)</Text>
             </Box>
             <Box flexDirection="column" height={bodyHeight} marginTop={1}>
                 {renderTab(tab, view, detail, scroll, bodyHeight, width)}
