@@ -1,6 +1,7 @@
 import { EventEmitter } from "events";
+import crypto from "crypto";
 import { Transport } from "./transport";
-import { TorrentMeta } from "./torrentFile";
+import { TorrentMeta, pieceLengthAt } from "./torrentFile";
 import { TrackerPool } from "./trackerPool";
 import { PeerAddress } from "./trackerHttp";
 import { PeerConnection } from "./peerConnection";
@@ -87,6 +88,9 @@ export class Torrent extends EventEmitter {
     private readonly peerMeta = new Map<string, PeerMeta>();
     private readonly inflightPerPeer = new Map<string, number>();
     private readonly pumping = new Set<string>();
+    // Pieces whose on-disk bytes we've SHA-1-confirmed before uploading, so we
+    // never serve corrupt data. Checked once per piece per session.
+    private readonly uploadVerified = new Set<number>();
     private readonly attempted = new Set<string>();
     private readonly maxPeers: number;
     private readonly pipelineDepth: number;
@@ -221,6 +225,7 @@ export class Torrent extends EventEmitter {
         return out;
     }
 
+    get hasMismatchedOutput(): boolean { return this.storage.hasMismatchedOutput; }
     get trackerStats() { return this.tracker.trackerStats; }
     get pieceStates() { return this.pieceManager.pieceStates(); }
     get pieceCounts() { return this.pieceManager.pieceCounts; }
@@ -231,16 +236,19 @@ export class Torrent extends EventEmitter {
         this.startedAt = Date.now();
         await this.storage.open();
 
+        const mode = this.options.mode ?? "full";
+
         if (this.options.seedExisting) {
             this.pieceManager.markAllSelectedDone();
         } else if (this.options.verifyExisting) {
-            const have = await this.storage.verifyExistingPieces(this.pieceManager.selected);
+            // Only a real download (full mode) seeds the temp file from salvaged
+            // output; a scan just reports what's actually on disk.
+            const have = await this.storage.verifyExistingPieces(this.pieceManager.selected, { importToTemp: mode === "full" });
             this.pieceManager.markHaves(have);
             await this.storage.finalizeFiles(this.pieceManager.haveBitfield);
             if (this.pieceManager.isComplete()) this.emit("complete");
         }
 
-        const mode = this.options.mode ?? "full";
         // Scan-only mode stops here: drive checked, no network brought up.
         if (mode === "scan") return;
 
@@ -407,12 +415,28 @@ export class Torrent extends EventEmitter {
         if (!this.pieceManager.haveBitfield.get(req.index)) return;
         const MAX_BLOCK = 128 * 1024;
         if (req.length === 0 || req.length > MAX_BLOCK) return;
+        if (!await this.verifyPieceForUpload(req.index)) return;
         if (this.options.uploadLimiter) await this.options.uploadLimiter.take(req.length);
         if (this.stopped || conn.amChoking) return;
         const block = await this.storage.readBlock(req.index, req.begin, req.length);
         conn.sendPiece(req.index, req.begin, block);
         this.uploadedBytesField += block.length;
         this.emit("uploaded", { peerId: conn.remotePeerId.toString("hex"), bytes: block.length });
+    }
+
+    // Confirm a piece's on-disk bytes still hash correctly before we upload any
+    // of it. If the disk content has gone bad, drop the piece back to "needed"
+    // so it's re-downloaded instead of serving corruption to a peer.
+    private async verifyPieceForUpload(index: number): Promise<boolean> {
+        if (this.uploadVerified.has(index)) return true;
+        const piece = await this.storage.readBlock(index, 0, pieceLengthAt(this.meta, index));
+        const ok = crypto.createHash("sha1").update(piece).digest().equals(this.meta.pieceHashes[index]);
+        if (ok) {
+            this.uploadVerified.add(index);
+            return true;
+        }
+        this.pieceManager.invalidatePiece(index);
+        return false;
     }
 
     private async handleBlock(key: string, index: number, begin: number, block: Buffer): Promise<void> {

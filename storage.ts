@@ -1,4 +1,4 @@
-import { open, mkdir, rename, stat, rm } from "fs/promises";
+import { open, mkdir, rename, stat, rm, readFile, writeFile } from "fs/promises";
 import { constants as fsConstants } from "fs";
 import crypto from "crypto";
 import path from "path";
@@ -15,7 +15,26 @@ interface FilePlan {
     // True once every piece of this file is present and it has been renamed
     // from the temp dir into its final location.
     finalized: boolean;
+    // Size of an existing file at finalPath on disk, if any. Set even when the
+    // size doesn't match the torrent's expected length — that's how we read and
+    // salvage a partial or mismatched output file rather than reporting 0%.
+    existingFinalSize?: number;
+    existingFinalMtimeMs?: number;
 }
+
+// On-disk record of a previous verification, stored alongside the output files.
+// If every output file's size and mtime still match, the cached `have` is reused
+// instead of re-hashing — so repeat scans of an unchanged downloads folder are
+// near-instant.
+interface CheckedCache {
+    version: number;
+    pieceCount: number;
+    files: Record<string, { size: number; mtimeMs: number }>;
+    have: string;
+}
+
+const CHECKED_CACHE_DIR = ".bittorrent-checked";
+const CHECKED_CACHE_VERSION = 1;
 
 // Drive-letter (C:\ or C:/) prefix — used to keep the temp dir on the same
 // volume as the final files so the completion rename never crosses devices.
@@ -52,10 +71,16 @@ export class Storage {
             const allocated = touchedFiles.has(f);
             const plan: FilePlan = { file: f, finalPath, tempPath, allocated, finalized: false };
             this.filePlans.push(plan);
+            // Record any existing output file's size for verify/import, even for
+            // files we won't actively write (so a scan can read them too).
+            const finalStat = await stat(finalPath).catch(() => undefined);
+            if (finalStat) {
+                plan.existingFinalSize = finalStat.size;
+                plan.existingFinalMtimeMs = finalStat.mtimeMs;
+            }
             if (!allocated) continue;
             // Already complete from a previous run? Read it straight from its
             // final spot; no temp file needed.
-            const finalStat = await stat(finalPath).catch(() => undefined);
             if (finalStat && finalStat.size === f.length) {
                 plan.finalized = true;
                 continue;
@@ -101,24 +126,118 @@ export class Storage {
     // valid. By default checks the touched/selected pieces (the only ones we
     // allocate); pass an explicit set to narrow further. Used on startup to
     // resume a partial download or confirm a seed without re-downloading.
-    async verifyExistingPieces(candidates?: Iterable<number>): Promise<Bitfield> {
+    async verifyExistingPieces(
+        candidates?: Iterable<number>,
+        // When importToTemp is set, every piece that verifies against an
+        // existing output file is copied into the in-progress temp file, so the
+        // download only has to fetch the missing/corrupt pieces. The original
+        // output file is left untouched until the download finishes and renames
+        // the temp file over it.
+        config?: { importToTemp?: boolean },
+    ): Promise<Bitfield> {
         if (!this.opened) throw new Error("Storage not open");
+
+        // Fast path for a pure scan (no temp import): if every output file is
+        // present and unchanged since the last verify, trust the cached result
+        // rather than re-hashing potentially gigabytes off disk.
+        const signature = this.cacheSignature();
+        if (!config?.importToTemp && signature) {
+            const cached = await this.loadCheckedCache();
+            if (cached && this.cacheMatches(cached, signature)) {
+                return new Bitfield(this.meta.pieceHashes.length, Buffer.from(cached.have, "base64"));
+            }
+        }
+
         const result = new Bitfield(this.meta.pieceHashes.length);
         const toCheck = candidates
             ? [...candidates]
             : (this.touchedPieces ? [...this.touchedPieces] : this.meta.pieceHashes.map((_, i) => i));
+        const valid: { index: number; data: Buffer }[] = [];
         for (const i of toCheck) {
             if (i < 0 || i >= this.meta.pieceHashes.length) continue;
             let data: Buffer;
             try {
-                data = await this.readAt(i * this.meta.pieceLength, pieceLengthAt(this.meta, i));
+                data = await this.readAt(i * this.meta.pieceLength, pieceLengthAt(this.meta, i), "existing");
             } catch {
-                continue; // file not allocated / unreadable → treat as missing
+                continue; // unreadable → treat as missing
             }
             const computed = crypto.createHash("sha1").update(data).digest();
-            if (computed.equals(this.meta.pieceHashes[i])) result.set(i);
+            if (!computed.equals(this.meta.pieceHashes[i])) continue;
+            result.set(i);
+            valid.push({ index: i, data });
         }
+
+        if (config?.importToTemp) {
+            // A right-sized file we optimistically read in place might still turn
+            // out to be the wrong content (failed verification). Demote it to the
+            // temp copy so the original output is left untouched until the
+            // re-download completes and renames over it.
+            for (const plan of this.filePlans) {
+                if (!plan.finalized || this.fileComplete(plan.file, result)) continue;
+                plan.finalized = false;
+                if (plan.existingFinalSize === undefined) plan.existingFinalSize = plan.file.length;
+                await this.allocate(plan.tempPath, plan.file.length);
+            }
+            for (const { index, data } of valid) {
+                await this.writeAt(index * this.meta.pieceLength, data, "tempOnly");
+            }
+        }
+
+        if (signature) await this.writeCheckedCache(result, signature);
         return result;
+    }
+
+    // True when an output file is physically on disk but isn't a clean, complete
+    // match (mis-sized or wrong content) — i.e. there's salvageable/corrupt data
+    // the UI should surface rather than reporting a plain empty download.
+    get hasMismatchedOutput(): boolean {
+        return this.filePlans.some((p) => p.existingFinalSize !== undefined && !p.finalized);
+    }
+
+    // Signature of the output files for the checked cache, but only when every
+    // touched file is physically present on disk. If anything is missing (a
+    // fresh download, or output we can only resume from temp) there's nothing
+    // stable to cache, so we return undefined and always re-hash.
+    private cacheSignature(): Record<string, { size: number; mtimeMs: number }> | undefined {
+        const touched = this.computeTouchedFiles();
+        const files: Record<string, { size: number; mtimeMs: number }> = {};
+        for (const plan of this.filePlans) {
+            if (!touched.has(plan.file)) continue;
+            if (plan.existingFinalSize === undefined || plan.existingFinalMtimeMs === undefined) return undefined;
+            files[plan.file.path.join("/")] = { size: plan.existingFinalSize, mtimeMs: plan.existingFinalMtimeMs };
+        }
+        return files;
+    }
+
+    private cacheMatches(cached: CheckedCache, signature: Record<string, { size: number; mtimeMs: number }>): boolean {
+        if (cached.version !== CHECKED_CACHE_VERSION) return false;
+        if (cached.pieceCount !== this.meta.pieceHashes.length) return false;
+        return JSON.stringify(cached.files) === JSON.stringify(signature);
+    }
+
+    private async loadCheckedCache(): Promise<CheckedCache | undefined> {
+        const raw = await readFile(this.checkedCachePath(), "utf8").catch(() => undefined);
+        if (!raw) return undefined;
+        try {
+            return JSON.parse(raw) as CheckedCache;
+        } catch {
+            return undefined;
+        }
+    }
+
+    private async writeCheckedCache(have: Bitfield, signature: Record<string, { size: number; mtimeMs: number }>): Promise<void> {
+        const cache: CheckedCache = {
+            version: CHECKED_CACHE_VERSION,
+            pieceCount: this.meta.pieceHashes.length,
+            files: signature,
+            have: Buffer.from(have.bytes).toString("base64"),
+        };
+        await mkdir(path.join(this.saveDir, CHECKED_CACHE_DIR), { recursive: true });
+        await writeFile(this.checkedCachePath(), JSON.stringify(cache), "utf8").catch(() => {});
+    }
+
+    private checkedCachePath(): string {
+        return path.join(this.saveDir, CHECKED_CACHE_DIR, `${this.meta.infoHash.toString("hex")}.json`);
     }
 
     async readBlock(pieceIndex: number, begin: number, length: number): Promise<Buffer> {
@@ -141,7 +260,9 @@ export class Storage {
         }
     }
 
-    private async writeAt(absoluteOffset: number, data: Buffer): Promise<void> {
+    // "tempOnly" mode skips files that are already complete in place (importing
+    // verified pieces only needs to fill the in-progress temp copy).
+    private async writeAt(absoluteOffset: number, data: Buffer, mode?: "tempOnly"): Promise<void> {
         let cursor = 0;
         for (const plan of this.filePlans) {
             const file = plan.file;
@@ -156,6 +277,7 @@ export class Storage {
             cursor = writeEnd - absoluteOffset;
             // File not allocated (outside selection). Skip silently.
             if (!plan.allocated) continue;
+            if (mode === "tempOnly" && plan.finalized) continue;
             const handle = await open(this.activePath(plan), fsConstants.O_RDWR | fsConstants.O_CREAT, 0o644);
             try {
                 await handle.write(data, dataOffset, sliceLength, fileOffset);
@@ -165,7 +287,12 @@ export class Storage {
         }
     }
 
-    private async readAt(absoluteOffset: number, length: number): Promise<Buffer> {
+    // "active" reads the data we manage (final file when finalized, else temp)
+    // and throws if a needed file isn't allocated. "existing" reads whatever is
+    // physically on disk — the existing output file (clamped to its real size,
+    // remaining bytes left as zeros) when present, else the temp file — and
+    // never throws, so a scan can salvage partial/mismatched output.
+    private async readAt(absoluteOffset: number, length: number, mode: "active" | "existing" = "active"): Promise<Buffer> {
         const out = Buffer.alloc(length);
         for (const plan of this.filePlans) {
             const file = plan.file;
@@ -177,6 +304,19 @@ export class Storage {
             const fileOffset = readStart - file.offsetInTorrent;
             const outOffset = readStart - absoluteOffset;
             const sliceLength = readEnd - readStart;
+            if (mode === "existing") {
+                const src = this.existingSource(plan);
+                if (!src || fileOffset >= src.limit) continue; // no data here → leave zeros
+                const avail = Math.min(sliceLength, src.limit - fileOffset);
+                const handle = await open(src.path, fsConstants.O_RDONLY).catch(() => undefined);
+                if (!handle) continue;
+                try {
+                    await handle.read(out, outOffset, avail, fileOffset);
+                } finally {
+                    await handle.close();
+                }
+                continue;
+            }
             if (!plan.allocated) {
                 throw new Error(`Read from unallocated file ${file.path.join("/")}`);
             }
@@ -188,6 +328,13 @@ export class Storage {
             }
         }
         return out;
+    }
+
+    // Where physically-present bytes for this file live, for "existing" reads.
+    private existingSource(plan: FilePlan): { path: string; limit: number } | undefined {
+        if (plan.existingFinalSize !== undefined) return { path: plan.finalPath, limit: plan.existingFinalSize };
+        if (plan.allocated) return { path: plan.tempPath, limit: plan.file.length };
+        return undefined;
     }
 
     private activePath(plan: FilePlan): string {

@@ -374,6 +374,16 @@ export class PieceManager extends EventEmitter {
         return { kind: "stored", canceled };
     }
 
+    // A piece we believed we had failed an on-the-fly hash check (disk rot or a
+    // bad salvage import). Drop it back to "needed" so it's re-downloaded, and
+    // un-count its bytes so progress reflects reality.
+    invalidatePiece(pieceIndex: number): void {
+        if (!this.haveBitfield.get(pieceIndex)) return;
+        this.haveBitfield.clear(pieceIndex);
+        this.downloadedBytesField -= pieceLengthAt(this.meta, pieceIndex);
+        this.resetPiece(pieceIndex);
+    }
+
     private resetPiece(pieceIndex: number): void {
         const piece = this.progress[pieceIndex];
         for (const b of piece.blocks) { b.have = false; b.inflight = 0; }

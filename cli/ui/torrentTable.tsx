@@ -7,6 +7,7 @@ const STATE_COLOR: Record<string, string> = {
     queued: "gray",
     checking: "blue",
     checked: "blue",
+    corrupted: "red",
     ready: "magenta",
     downloading: "cyan",
     seeding: "green",
@@ -19,6 +20,7 @@ const STATE_COLOR: Record<string, string> = {
 // Short labels for the fixed-width state column so nothing wraps.
 const STATE_LABEL: Record<string, string> = {
     downloading: "down",
+    corrupted: "corrupt",
 };
 
 const SECTION_COLOR: Record<string, string> = {

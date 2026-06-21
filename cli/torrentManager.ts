@@ -29,6 +29,7 @@ export type TorrentState =
     | "queued"
     | "checking"
     | "checked"      // scan-mode: drive verified, incomplete
+    | "corrupted"    // output files on disk don't fully match; partial/wrong data present
     | "ready"        // scrape-mode: swarm stats gathered, no transfers
     | "downloading"  // holds a download slot, fetching blocks
     | "seeding"      // complete, uploaded recently
@@ -629,6 +630,7 @@ export class TorrentManager extends EventEmitter {
         const complete = this.isComplete(m);
         if (this.mode === "scan") {
             if (complete) return "done";
+            if (m.torrent.hasMismatchedOutput) return "corrupted";
             return "checked";
         }
         if (this.mode === "scrape") return "ready";
@@ -637,6 +639,7 @@ export class TorrentManager extends EventEmitter {
             return "idle";
         }
         if (m.downloadEnabled) return "downloading";
+        if (m.torrent.hasMismatchedOutput) return "corrupted";
         return "queued";
     }
 

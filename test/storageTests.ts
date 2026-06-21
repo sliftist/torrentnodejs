@@ -2,7 +2,7 @@ import assert from "assert";
 import crypto from "crypto";
 import os from "os";
 import path from "path";
-import { mkdtemp, rm, stat } from "fs/promises";
+import { mkdtemp, rm, stat, writeFile, utimes, open as fsOpen } from "fs/promises";
 import { Storage } from "../storage";
 import { Bitfield } from "../bitfield";
 import { TorrentMeta } from "../torrentFile";
@@ -86,6 +86,78 @@ export async function runStorageTests() {
         await s4.close();
     } finally {
         await rm(dir, { recursive: true, force: true });
+    }
+
+    // Salvage: an output file already sitting in the save dir but with the wrong
+    // total size (here, trailing garbage) used to report 0% because we only read
+    // the empty temp copy. Now its still-valid pieces are recognized, imported
+    // into the temp copy, and the original output file is left untouched.
+    const salvageDir = await mkdtemp(path.join(os.tmpdir(), "bt-storage-salvage-"));
+    try {
+        const tail = crypto.randomBytes(5000);
+        await writeFile(path.join(salvageDir, "blob.bin"), Buffer.concat([data, tail]));
+
+        const s = new Storage(meta, salvageDir);
+        await s.open();
+        const have = await s.verifyExistingPieces(undefined, { importToTemp: true });
+        assert.strictEqual(have.popcount(), meta.pieceHashes.length, "valid pieces salvaged from a mis-sized output file");
+
+        // The salvaged bytes now read back from the in-progress temp copy.
+        const salvaged = await s.readBlock(2, 0, 256);
+        assert.ok(salvaged.equals(data.subarray(2 * pieceLength, 2 * pieceLength + 256)), "salvaged pieces imported into temp");
+
+        // The original output file must stay exactly as it was until completion.
+        const original = await stat(path.join(salvageDir, "blob.bin"));
+        assert.strictEqual(original.size, data.length + tail.length, "original output file left untouched");
+        await s.close();
+    } finally {
+        await rm(salvageDir, { recursive: true, force: true });
+    }
+
+    // Checked cache: once an unchanged output file has been verified, a repeat
+    // verify trusts the cache (size+mtime) instead of re-hashing. We prove this
+    // by corrupting the file's bytes while preserving its size and mtime — the
+    // cache hit still reports all pieces valid. Then bumping the mtime forces a
+    // real re-hash that catches the corruption.
+    const cacheDir = await mkdtemp(path.join(os.tmpdir(), "bt-storage-cache-"));
+    try {
+        const file = path.join(cacheDir, "blob.bin");
+        await writeFile(file, data);
+        // Pin the mtime to a whole second so it round-trips through utimes exactly
+        // (sub-millisecond stat precision would otherwise defeat the comparison).
+        const fixed = new Date(Math.floor(Date.now() / 1000) * 1000);
+        await utimes(file, fixed, fixed);
+
+        const s = new Storage(meta, cacheDir);
+        await s.open();
+        const first = await s.verifyExistingPieces();
+        assert.strictEqual(first.popcount(), meta.pieceHashes.length, "fresh verify hashes the full file");
+        await s.close();
+
+        // Corrupt the first piece in place, then restore the same mtime.
+        const h = await fsOpen(file, "r+");
+        await h.write(Buffer.alloc(200, 0xff), 0, 200, 0);
+        await h.close();
+        await utimes(file, fixed, fixed);
+
+        const s2 = new Storage(meta, cacheDir);
+        await s2.open();
+        const cached = await s2.verifyExistingPieces();
+        assert.strictEqual(cached.popcount(), meta.pieceHashes.length, "unchanged size+mtime → cache hit, no re-hash");
+        await s2.close();
+
+        // Bump the mtime: the cache is now stale and a real re-hash runs.
+        const later = new Date(fixed.getTime() + 5000);
+        await utimes(file, later, later);
+
+        const s3 = new Storage(meta, cacheDir);
+        await s3.open();
+        const rehashed = await s3.verifyExistingPieces();
+        assert.ok(!rehashed.get(0), "changed mtime invalidates the cache and the corrupt piece is caught");
+        assert.ok(rehashed.get(1) && rehashed.get(2), "intact pieces still verify after re-hash");
+        await s3.close();
+    } finally {
+        await rm(cacheDir, { recursive: true, force: true });
     }
 
     console.log("Storage tests passed.");
