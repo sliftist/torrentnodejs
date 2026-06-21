@@ -176,7 +176,7 @@ export interface TorrentManagerOptions {
 export class TorrentManager extends EventEmitter {
     private readonly transport: Transport;
     private readonly downloadDir: string;
-    private readonly scheduler: SchedulerSettings;
+    private scheduler: SchedulerSettings;
     private readonly peerId: Buffer;
     private readonly stateDir: string;
     private readonly listenPort: number;
@@ -228,6 +228,27 @@ export class TorrentManager extends EventEmitter {
     }
 
     get runMode(): RunMode { return this.mode; }
+
+    // Where torrent data is written, shown in the UI footer.
+    get outputDir(): string { return this.downloadDir; }
+
+    // A copy of the current limits so the UI can display/edit them without
+    // mutating our internal state directly.
+    get schedulerSettings(): SchedulerSettings { return { ...this.scheduler }; }
+
+    // Apply changed limits live to the running services, no restart needed.
+    // Persisting to disk is the caller's job (it owns the config file).
+    updateScheduler(changes: Partial<SchedulerSettings>): void {
+        this.scheduler = { ...this.scheduler, ...changes };
+        this.uploadLimiter?.setRate(this.scheduler.uploadMbps * BYTES_PER_MBIT);
+        this.connectionBudget?.setMax(this.scheduler.activeConnections);
+        this.chokeManager?.setSlots({
+            uploadSlots: this.scheduler.uploadSlots,
+            optimisticSlots: this.scheduler.optimisticUnchokeSlots,
+        });
+        this.applyBandwidthSplit();
+        this.emit("update");
+    }
 
     setMode(mode: RunMode): void {
         if (mode === this.mode) return;

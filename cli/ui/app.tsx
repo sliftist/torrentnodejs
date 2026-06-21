@@ -4,7 +4,7 @@ import { statSync } from "fs";
 import { TorrentManager, TorrentView } from "../torrentManager";
 import { SourceWatcher } from "../watcher";
 import { normalizeForFilter, truncate } from "./format";
-import { cleanPathInput, RUN_MODES, RunMode } from "../config";
+import { cleanPathInput, RUN_MODES, RunMode, SchedulerSettings } from "../config";
 import { Header } from "./header";
 import { TorrentTable } from "./torrentTable";
 import { DetailView, DETAIL_TABS, DetailTab } from "./detailView";
@@ -15,6 +15,8 @@ export interface AppProps {
     localIP: string;
     // Persist a newly-added source folder to config + start watching it.
     onAddSource: (folder: string) => void;
+    // Apply + persist changed transfer limits.
+    onSchedulerChange: (changes: Partial<SchedulerSettings>) => void;
     // Connection details for the web-control server, shown via an action.
     webUrl?: string;
     webPassword?: string;
@@ -22,12 +24,24 @@ export interface AppProps {
 
 type View = "list" | "detail";
 // Transient input surfaces drawn over the footer. "none" is the resting state.
-type Overlay = "none" | "actions" | "filter" | "addFolder";
+type Overlay = "none" | "actions" | "filter" | "addFolder" | "limits";
 
 interface Action {
     label: string;
     run: () => void;
 }
+
+// The editable limits, in display order. Keys map straight onto
+// SchedulerSettings; everything here is a plain integer.
+const LIMIT_FIELDS: { key: keyof SchedulerSettings; label: string }[] = [
+    { key: "downloadMbps", label: "Download (Mbps, 0=∞)" },
+    { key: "uploadMbps", label: "Upload (Mbps, 0=∞)" },
+    { key: "downloadSlots", label: "Download slots" },
+    { key: "activeConnections", label: "Max connections" },
+    { key: "connectionsPerTorrent", label: "Conns / torrent" },
+    { key: "uploadSlots", label: "Upload slots" },
+    { key: "optimisticUnchokeSlots", label: "Optimistic slots" },
+];
 
 // Cap UI redraws to ~14 fps. Coalesces bursts of manager "update" events into a
 // single render so input stays responsive during mass torrent state changes.
@@ -35,7 +49,7 @@ const RENDER_THROTTLE_MS = 70;
 const MENU_WIDTH = 36;
 
 export function App(props: AppProps) {
-    const { manager, watcher, localIP, onAddSource, webUrl, webPassword } = props;
+    const { manager, watcher, localIP, onAddSource, onSchedulerChange, webUrl, webPassword } = props;
     const { exit } = useApp();
     const { stdout } = useStdout();
 
@@ -45,6 +59,9 @@ export function App(props: AppProps) {
     const [overlay, setOverlay] = useState<Overlay>("none");
     const [filter, setFilter] = useState("");
     const [folderDraft, setFolderDraft] = useState("");
+    // Limits editor: per-field draft strings + which field is focused.
+    const [limitsDraft, setLimitsDraft] = useState<Record<string, string>>({});
+    const [limitIndex, setLimitIndex] = useState(0);
     const [actionIndex, setActionIndex] = useState(0);
     const [selectedIndex, setSelectedIndex] = useState(0);
     const [selectedHash, setSelectedHash] = useState<string | undefined>(undefined);
@@ -125,6 +142,15 @@ export function App(props: AppProps) {
         setOverlay("none");
     }
 
+    function openLimits(): void {
+        const s = manager.schedulerSettings;
+        const draft: Record<string, string> = {};
+        for (const f of LIMIT_FIELDS) draft[f.key] = String(s[f.key]);
+        setLimitsDraft(draft);
+        setLimitIndex(0);
+        setOverlay("limits");
+    }
+
     function jumpSection(dir: 1 | -1): void {
         if (sectionStarts.length === 0) return;
         let cur = 0;
@@ -154,6 +180,7 @@ export function App(props: AppProps) {
             });
         }
         acts.push({ label: "Add folder…", run: () => { setFolderDraft(""); setOverlay("addFolder"); } });
+        acts.push({ label: "Edit limits…", run: openLimits });
         if (webUrl && webPassword) {
             acts.push({
                 label: "Show web password",
@@ -198,6 +225,32 @@ export function App(props: AppProps) {
             return;
         }
 
+        if (overlay === "limits") {
+            if (key.escape) { setOverlay("none"); return; }
+            if (key.upArrow) { setLimitIndex((i) => Math.max(0, i - 1)); return; }
+            if (key.downArrow) { setLimitIndex((i) => Math.min(LIMIT_FIELDS.length - 1, i + 1)); return; }
+            if (key.return) {
+                const changes: Partial<SchedulerSettings> = {};
+                for (const f of LIMIT_FIELDS) {
+                    const n = parseInt(limitsDraft[f.key], 10);
+                    if (isFinite(n) && n >= 0) changes[f.key] = n;
+                }
+                onSchedulerChange(changes);
+                setNotice("Limits updated");
+                setOverlay("none");
+                return;
+            }
+            const cur = LIMIT_FIELDS[Math.min(limitIndex, LIMIT_FIELDS.length - 1)].key;
+            if (key.backspace || key.delete) {
+                setLimitsDraft((d) => ({ ...d, [cur]: (d[cur] || "").slice(0, -1) }));
+                return;
+            }
+            if (input && /^[0-9]$/.test(input)) {
+                setLimitsDraft((d) => ({ ...d, [cur]: (d[cur] || "") + input }));
+            }
+            return;
+        }
+
         if (overlay === "actions") {
             if (key.escape || key.leftArrow) { setOverlay("none"); return; }
             if (key.upArrow) { setActionIndex((i) => Math.max(0, i - 1)); return; }
@@ -231,7 +284,7 @@ export function App(props: AppProps) {
     });
 
     const width = dims.cols;
-    const bodyHeight = Math.max(4, dims.rows - 9);
+    const bodyHeight = Math.max(4, dims.rows - 10);
 
     let body: React.ReactNode;
     if (view === "detail" && detail && detailViewModel) {
@@ -247,6 +300,7 @@ export function App(props: AppProps) {
                 {body}
             </Box>
             {overlay === "actions" && <ActionsMenu actions={actions} index={actionIndex} />}
+            {overlay === "limits" && <LimitsEditor draft={limitsDraft} index={limitIndex} />}
             <Footer
                 width={width}
                 view={view}
@@ -254,6 +308,7 @@ export function App(props: AppProps) {
                 filter={filter}
                 folderDraft={folderDraft}
                 folders={watcher.watchedFolders}
+                output={manager.outputDir}
                 notice={notice}
             />
         </Box>
@@ -278,6 +333,27 @@ function ActionsMenu(props: { actions: Action[]; index: number }) {
     );
 }
 
+function LimitsEditor(props: { draft: Record<string, string>; index: number }) {
+    const { draft, index } = props;
+    return (
+        <Box flexDirection="column" width={MENU_WIDTH} borderStyle="round" borderColor="cyan" paddingX={1}>
+            <Text bold color="cyan">Edit limits</Text>
+            {LIMIT_FIELDS.map((f, i) => {
+                const active = i === index;
+                return (
+                    <Box key={f.key} justifyContent="space-between">
+                        <Text color={active && "cyan" || "white"}>{(active && "› " || "  ") + f.label}</Text>
+                        <Text color={active && "black" || "white"} backgroundColor={active && "cyan" || undefined}>
+                            {` ${draft[f.key] || "0"} `}
+                        </Text>
+                    </Box>
+                );
+            })}
+            <Text dimColor>↑↓ field · 0-9 edit · Enter save · Esc cancel</Text>
+        </Box>
+    );
+}
+
 function Footer(props: {
     width: number;
     view: View;
@@ -285,9 +361,10 @@ function Footer(props: {
     filter: string;
     folderDraft: string;
     folders: string[];
+    output: string;
     notice: string;
 }) {
-    const { width, view, overlay, filter, folderDraft, folders, notice } = props;
+    const { width, view, overlay, filter, folderDraft, folders, output, notice } = props;
 
     let topLine: React.ReactNode;
     if (overlay === "filter") {
@@ -327,6 +404,9 @@ function Footer(props: {
             <Box>
                 <Text dimColor>{sourcesLine}</Text>
                 {Boolean(notice) && <Text color="yellow">{`   ${truncate(notice, width - 4)}`}</Text>}
+            </Box>
+            <Box>
+                <Text dimColor>{`output: ${truncate(output, width - 12)}`}</Text>
             </Box>
         </Box>
     );

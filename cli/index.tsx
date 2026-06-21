@@ -64,12 +64,19 @@ async function main() {
         watcher.addFolder(resolved);
     };
 
+    const onSchedulerChange = (changes: Partial<typeof config.scheduler>) => {
+        manager.updateScheduler(changes);
+        config.scheduler = { ...config.scheduler, ...changes };
+        void saveConfig(config);
+    };
+
     const app = render(
         <App
             manager={manager}
             watcher={watcher}
             localIP={wg.localIP}
             onAddSource={onAddSource}
+            onSchedulerChange={onSchedulerChange}
             webUrl={webUrl}
             webPassword={webPassword}
         />,
