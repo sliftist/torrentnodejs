@@ -49,6 +49,3 @@ Torrents split into lists:
     seeding actively
     downloading but queued (not enough download slots available)
     seeding, but no one has download for the last minute.
-
-forwardPort from socket-function for upnp forwarding
-
