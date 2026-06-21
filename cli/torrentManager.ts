@@ -9,6 +9,7 @@ import { PeerListener } from "../peerListener";
 import { RateLimiter } from "../rateLimiter";
 import { ChokeManager } from "../chokeManager";
 import { ConnectionBudget } from "../connectionBudget";
+import { DialStats } from "../dialStats";
 import { SchedulerSettings } from "./config";
 
 const STATE_FILENAME = "bittorrent.state.json";
@@ -97,6 +98,12 @@ export interface AggregateView {
     wirePacketsReceived: number;
     wireSendRate: number;
     wireRecvRate: number;
+    // Outbound peer dials: cumulative totals plus the average per-second rate
+    // over the trailing 60 seconds. "failed" dials never reached a working peer.
+    dialAttempts: number;
+    dialFailures: number;
+    dialAttemptRate: number;
+    dialFailRate: number;
 }
 
 export interface TorrentDetail {
@@ -173,6 +180,11 @@ export class TorrentManager extends EventEmitter {
     private lastWireReceived = 0;
     private wireSendRate = 0;
     private wireRecvRate = 0;
+    // Trailing 60-second samples of cumulative dial counters, for the per-second
+    // rate. One sample per tick (~1s); entries older than 60s are dropped.
+    private dialSamples: { t: number; attempts: number; failures: number }[] = [];
+    private dialAttemptRate = 0;
+    private dialFailRate = 0;
 
     // Shared services, created on start().
     private peerListener?: PeerListener;
@@ -180,6 +192,7 @@ export class TorrentManager extends EventEmitter {
     private uploadLimiter?: RateLimiter;
     private chokeManager?: ChokeManager;
     private connectionBudget?: ConnectionBudget;
+    private dialStats?: DialStats;
 
     constructor(opts: TorrentManagerOptions) {
         super();
@@ -216,6 +229,7 @@ export class TorrentManager extends EventEmitter {
         this.downloadLimiter = new RateLimiter(this.scheduler.downloadMbps * BYTES_PER_MBIT);
         this.uploadLimiter = new RateLimiter(this.scheduler.uploadMbps * BYTES_PER_MBIT);
         this.connectionBudget = new ConnectionBudget(this.scheduler.activeConnections);
+        this.dialStats = new DialStats();
         this.chokeManager = new ChokeManager({
             uploadSlots: this.scheduler.uploadSlots,
             optimisticSlots: this.scheduler.optimisticUnchokeSlots,
@@ -334,6 +348,10 @@ export class TorrentManager extends EventEmitter {
             wirePacketsReceived: wire?.packetsReceived ?? 0,
             wireSendRate: this.wireSendRate,
             wireRecvRate: this.wireRecvRate,
+            dialAttempts: this.dialStats?.attempts ?? 0,
+            dialFailures: this.dialStats?.failures ?? 0,
+            dialAttemptRate: this.dialAttemptRate,
+            dialFailRate: this.dialFailRate,
         };
     }
 
@@ -502,6 +520,17 @@ export class TorrentManager extends EventEmitter {
             this.lastWireReceived = wire.bytesReceived;
         }
 
+        if (this.dialStats) {
+            this.dialSamples.push({ t: now, attempts: this.dialStats.attempts, failures: this.dialStats.failures });
+            while (this.dialSamples.length > 0 && now - this.dialSamples[0].t > 60_000) this.dialSamples.shift();
+            const oldest = this.dialSamples[0];
+            const span = (now - oldest.t) / 1000;
+            if (span > 0) {
+                this.dialAttemptRate = (this.dialStats.attempts - oldest.attempts) / span;
+                this.dialFailRate = (this.dialStats.failures - oldest.failures) / span;
+            }
+        }
+
         this.runScheduler(now);
         this.emit("update");
     }
@@ -596,6 +625,7 @@ export class TorrentManager extends EventEmitter {
                 uploadLimiter: this.uploadLimiter,
                 chokeManager: this.chokeManager,
                 connectionBudget: this.connectionBudget,
+                dialStats: this.dialStats,
                 listenPort: this.listenPort,
             },
         });

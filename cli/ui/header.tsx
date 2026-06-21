@@ -26,6 +26,11 @@ export function Header(props: { agg: AggregateView; localIP: string; width: numb
                 <Text dimColor>{`conns ${agg.connections}`}</Text>
             </Box>
             <Box>
+                <Text dimColor>dials </Text>
+                <Text>{`${formatNumber(agg.dialAttempts)} · ${formatNumber(agg.dialAttemptRate)}/s   `}</Text>
+                <Text color="red">{`failed ${formatNumber(agg.dialFailures)} · ${formatNumber(agg.dialFailRate)}/s`}</Text>
+            </Box>
+            <Box>
                 <Text color="cyan">{`↓ ${formatRate(agg.downRate)}  `}</Text>
                 <Text color="green">{`↑ ${formatRate(agg.upRate)}   `}</Text>
                 <Text dimColor>{`total ↓${formatBytes(agg.downloadedBytes)} ↑${formatBytes(agg.uploadedBytes)}`}</Text>

@@ -10,6 +10,7 @@ import { PeerListener, InboundPeer } from "./peerListener";
 import { RateLimiter } from "./rateLimiter";
 import { ChokeManager } from "./chokeManager";
 import { ConnectionBudget } from "./connectionBudget";
+import { DialStats } from "./dialStats";
 
 // How many lifecycle phases the torrent actually runs:
 //  - "scan":    open + SHA-1 verify on-disk pieces only. No network at all.
@@ -52,6 +53,8 @@ export interface TorrentOptions {
     uploadLimiter?: RateLimiter;
     chokeManager?: ChokeManager;
     connectionBudget?: ConnectionBudget;
+    // Counts outbound dials and the ones that fail, across all torrents.
+    dialStats?: DialStats;
     // Port to report to trackers when there's no shared listener.
     listenPort?: number;
 }
@@ -323,7 +326,9 @@ export class Torrent extends EventEmitter {
         if (this.options.connectionBudget && !this.options.connectionBudget.hasRoom) return;
         if (this.options.connectionBudget && !this.options.connectionBudget.acquire()) return;
         this.attempted.add(key);
+        this.options.dialStats?.attempt();
         this.connectPeer(p, key).catch(() => {
+            this.options.dialStats?.fail();
             this.attempted.delete(key);
             this.options.connectionBudget?.release();
         });
