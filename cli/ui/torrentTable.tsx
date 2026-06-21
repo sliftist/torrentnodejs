@@ -16,9 +16,15 @@ const STATE_COLOR: Record<string, string> = {
     error: "red",
 };
 
+// Short labels for the fixed-width state column so nothing wraps.
+const STATE_LABEL: Record<string, string> = {
+    downloading: "down",
+};
+
 const SECTION_COLOR: Record<string, string> = {
     downloading: "cyan",
     downloadingQueued: "gray",
+    downloadingNoPeers: "gray",
     seeding: "green",
     seedingIdle: "gray",
 };
@@ -103,7 +109,7 @@ export function TorrentTable(props: {
                         <Box width={nameWidth}>
                             <Text bold={selected} inverse={selected}>{truncate(v.name, nameWidth - 1)}</Text>
                         </Box>
-                        <Box width={8}><Text color={STATE_COLOR[v.state] || "white"}>{v.state}</Text></Box>
+                        <Box width={8}><Text color={STATE_COLOR[v.state] || "white"}>{STATE_LABEL[v.state] || v.state}</Text></Box>
                         <Box width={7}><Text>{formatPercent(v.progress)}</Text></Box>
                         <Box width={9}><Text color="cyan">{formatRate(v.downRate)}</Text></Box>
                         <Box width={9}><Text color="green">{formatRate(v.upRate)}</Text></Box>

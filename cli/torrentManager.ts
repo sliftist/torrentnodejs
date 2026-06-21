@@ -63,16 +63,17 @@ export interface TorrentView {
 }
 
 // The four lists from the spec.
-export type SectionKey = "downloading" | "seeding" | "downloadingQueued" | "seedingIdle";
+export type SectionKey = "downloading" | "seeding" | "downloadingQueued" | "downloadingNoPeers" | "seedingIdle";
 
 export const SECTION_TITLES: Record<SectionKey, string> = {
     downloading: "downloading actively",
     seeding: "seeding actively",
-    downloadingQueued: "downloading but queued",
+    downloadingQueued: "downloading but queued (no free slot)",
+    downloadingNoPeers: "downloading but no seeders",
     seedingIdle: "seeding, but no one has downloaded for the last minute",
 };
 
-export const SECTION_ORDER: SectionKey[] = ["downloading", "seeding", "downloadingQueued", "seedingIdle"];
+export const SECTION_ORDER: SectionKey[] = ["downloading", "seeding", "downloadingQueued", "downloadingNoPeers", "seedingIdle"];
 
 export interface TorrentSection {
     key: SectionKey;
@@ -393,7 +394,7 @@ export class TorrentManager extends EventEmitter {
 
     sections(): TorrentSection[] {
         const buckets: Record<SectionKey, ManagedTorrent[]> = {
-            downloading: [], seeding: [], downloadingQueued: [], seedingIdle: [],
+            downloading: [], seeding: [], downloadingQueued: [], downloadingNoPeers: [], seedingIdle: [],
         };
         for (const m of this.torrents.values()) buckets[this.sectionOf(m)].push(m);
         return SECTION_ORDER.map((key) => ({
@@ -414,6 +415,11 @@ export class TorrentManager extends EventEmitter {
             return "seedingIdle";
         }
         if (m.torrent && m.downloadEnabled) return "downloading";
+        // Incomplete and not in a download slot: split "has peers but is waiting
+        // for a free slot" from "actively trying but nobody is seeding to us".
+        // Paused/checking/not-yet-started torrents fall through to the queued
+        // bucket rather than being mislabelled as having no seeders.
+        if (m.torrent && m.started && !m.paused && m.torrent.connectedPeers === 0) return "downloadingNoPeers";
         return "downloadingQueued";
     }
 
