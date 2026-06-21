@@ -1,4 +1,4 @@
-import { open, mkdir, rename, stat, rm, readFile, writeFile } from "fs/promises";
+import { open, mkdir, rename, stat, rm, readFile, writeFile, FileHandle } from "fs/promises";
 import { constants as fsConstants } from "fs";
 import crypto from "crypto";
 import path from "path";
@@ -44,6 +44,30 @@ export const diskIO = { bytesRead: 0, bytesWritten: 0 };
 // Drive-letter (C:\ or C:/) prefix — used to keep the temp dir on the same
 // volume as the final files so the completion rename never crosses devices.
 const WINDOWS_DRIVE = /^([A-Za-z]):[\\/]/;
+
+// fs read/write may transfer fewer bytes than requested in a single call — a
+// documented Node caveat that bites on Windows (large reads routinely come back
+// short) while Linux usually fills the whole request, so a single read/write
+// silently leaves the buffer tail untouched and every SHA-1 mismatches. Loop
+// until the full range is moved (or EOF, for reads).
+async function readFully(handle: FileHandle, buffer: Buffer, offset: number, length: number, position: number): Promise<number> {
+    let total = 0;
+    while (total < length) {
+        const { bytesRead } = await handle.read(buffer, offset + total, length - total, position + total);
+        if (bytesRead === 0) break;
+        total += bytesRead;
+    }
+    return total;
+}
+
+async function writeFully(handle: FileHandle, buffer: Buffer, offset: number, length: number, position: number): Promise<void> {
+    let total = 0;
+    while (total < length) {
+        const { bytesWritten } = await handle.write(buffer, offset + total, length - total, position + total);
+        if (bytesWritten === 0) throw new Error(`Wrote 0 of ${length - total} remaining bytes at position ${position + total}`);
+        total += bytesWritten;
+    }
+}
 
 // Maps the linear concatenated piece stream onto one or more on-disk files.
 //
@@ -285,7 +309,7 @@ export class Storage {
             if (mode === "tempOnly" && plan.finalized) continue;
             const handle = await open(this.activePath(plan), fsConstants.O_RDWR | fsConstants.O_CREAT, 0o644);
             try {
-                await handle.write(data, dataOffset, sliceLength, fileOffset);
+                await writeFully(handle, data, dataOffset, sliceLength, fileOffset);
                 diskIO.bytesWritten += sliceLength;
             } finally {
                 await handle.close();
@@ -317,8 +341,7 @@ export class Storage {
                 const handle = await open(src.path, fsConstants.O_RDONLY).catch(() => undefined);
                 if (!handle) continue;
                 try {
-                    await handle.read(out, outOffset, avail, fileOffset);
-                    diskIO.bytesRead += avail;
+                    diskIO.bytesRead += await readFully(handle, out, outOffset, avail, fileOffset);
                 } finally {
                     await handle.close();
                 }
@@ -329,8 +352,7 @@ export class Storage {
             }
             const handle = await open(this.activePath(plan), fsConstants.O_RDONLY);
             try {
-                await handle.read(out, outOffset, sliceLength, fileOffset);
-                diskIO.bytesRead += sliceLength;
+                diskIO.bytesRead += await readFully(handle, out, outOffset, sliceLength, fileOffset);
             } finally {
                 await handle.close();
             }
