@@ -76,7 +76,9 @@ async function main() {
     await copyFile(torrentSrc, torrentDst);
 
     watcher.start();
-    await delay(600); // let it scan + parse
+    // Wait for the scheduler to start + verify the torrent (verification of a
+    // missing on-disk file is instant; the scheduler tick is once a second).
+    await delay(1800);
 
     let views = manager.views();
     assert.strictEqual(views.length, 1, `expected 1 torrent, got ${views.length}`);

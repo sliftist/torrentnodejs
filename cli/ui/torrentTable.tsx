@@ -5,7 +5,8 @@ import { formatRate, formatPercent, formatEta, formatNumber, formatBytes, format
 
 const STATE_COLOR: Record<string, string> = {
     queued: "gray",
-    checking: "blue",
+    unverified: "gray",
+    verifying: "blue",
     checked: "blue",
     corrupted: "red",
     ready: "magenta",
@@ -21,7 +22,6 @@ const STATE_COLOR: Record<string, string> = {
 const STATE_LABEL: Record<string, string> = {
     downloading: "down",
     corrupted: "corrupt",
-    checking: "verify",
 };
 
 const SECTION_COLOR: Record<string, string> = {
@@ -46,7 +46,7 @@ export function TorrentTable(props: {
     height: number;
 }) {
     const { sections, selectedHash, width, height } = props;
-    const nameWidth = Math.max(10, width - 117);
+    const nameWidth = Math.max(10, width - 120);
     const total = sections.reduce((a, s) => a + s.items.length, 0);
 
     if (total === 0) {
@@ -76,7 +76,7 @@ export function TorrentTable(props: {
             <Box>
                 <Box width={2}><Text> </Text></Box>
                 <Box width={nameWidth}><Text dimColor bold>name</Text></Box>
-                <Box width={8}><Text dimColor bold>state</Text></Box>
+                <Box width={11}><Text dimColor bold>state</Text></Box>
                 <Box width={7}><Text dimColor bold>prog</Text></Box>
                 <Box width={9}><Text dimColor bold>size</Text></Box>
                 <Box width={7}><Text dimColor bold>chunks</Text></Box>
@@ -117,7 +117,7 @@ export function TorrentTable(props: {
                         <Box width={nameWidth}>
                             <Text bold={selected} inverse={selected}>{truncate(v.name, nameWidth - 1)}</Text>
                         </Box>
-                        <Box width={8}><Text color={STATE_COLOR[v.state] || "white"}>{STATE_LABEL[v.state] || v.state}</Text></Box>
+                        <Box width={11}><Text color={STATE_COLOR[v.state] || "white"}>{STATE_LABEL[v.state] || v.state}</Text></Box>
                         <Box width={7}><Text>{formatPercent(v.progress)}</Text></Box>
                         <Box width={9}><Text>{formatBytes(v.sizeBytes)}</Text></Box>
                         <Box width={7}><Text>{String(v.pieceCount)}</Text></Box>

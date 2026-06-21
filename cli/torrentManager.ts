@@ -28,7 +28,8 @@ const CHOKE_INTERVAL_MS = 10 * 1000;
 
 export type TorrentState =
     | "queued"
-    | "checking"
+    | "unverified"   // on-disk data not hashed yet; waiting its turn to be scanned
+    | "verifying"    // actively hashing on-disk data right now
     | "checked"      // scan-mode: drive verified, incomplete
     | "corrupted"    // output files on disk don't fully match; partial/wrong data present
     | "ready"        // scrape-mode: swarm stats gathered, no transfers
@@ -142,6 +143,9 @@ interface ManagedTorrent {
     torrent?: Torrent;
     started: boolean;
     starting: boolean;
+    // True once the on-disk data has been hashed at least once. Until then the
+    // torrent lives in the "verifying" group and can't transfer.
+    verified: boolean;
     knownProgress: number;
     paused: boolean;
     error?: string;
@@ -345,6 +349,7 @@ export class TorrentManager extends EventEmitter {
             meta,
             started: false,
             starting: false,
+            verified: false,
             knownProgress: 0,
             paused: this.pausedPersisted.has(infoHash),
             downloadEnabled: false,
@@ -607,18 +612,32 @@ export class TorrentManager extends EventEmitter {
         return SECTION_ORDER.map((key) => ({
             key,
             title: SECTION_TITLES[key],
-            items: buckets[key]
-                .sort((a, b) => (b.meta.creationDate ?? 0) - (a.meta.creationDate ?? 0))
-                .map((m) => this.toView(m)),
+            items: this.sortBucket(key, buckets[key]).map((m) => this.toView(m)),
         }));
+    }
+
+    // The verifying group is ordered the way we'll actually process it: the ones
+    // being hashed right now on top, then everyone else in queue (iteration)
+    // order. Every other group keeps the newest-torrent-first ordering.
+    private sortBucket(key: SectionKey, items: ManagedTorrent[]): ManagedTorrent[] {
+        if (key === "verifying") {
+            return items.sort((a, b) => {
+                const aActive = !!(a.torrent && !a.started);
+                const bActive = !!(b.torrent && !b.started);
+                if (aActive !== bActive) return aActive && -1 || 1;
+                return a.queueOrder - b.queueOrder;
+            });
+        }
+        return items.sort((a, b) => (b.meta.creationDate ?? 0) - (a.meta.creationDate ?? 0));
     }
 
     // ---- internals ----
 
     private sectionOf(m: ManagedTorrent): SectionKey {
-        // A torrent whose instance exists but hasn't finished starting is still
-        // hashing its on-disk data — it can't transfer until that completes.
-        if (m.torrent && !m.started && !m.paused && !m.error) return "verifying";
+        // Everything starts here: a torrent can't transfer until its on-disk data
+        // has been hashed. It stays in this group whether it's actively being
+        // scanned now or still waiting its turn, until verification completes.
+        if (!m.verified && !m.error) return "verifying";
         const complete = this.isComplete(m);
         if (complete) {
             if (m.torrent && this.uploadedRecently(m)) return "seeding";
@@ -706,8 +725,12 @@ export class TorrentManager extends EventEmitter {
     private displayState(m: ManagedTorrent): TorrentState {
         if (m.error) return "error";
         if (m.paused) return "paused";
+        // Until the on-disk data has been hashed, the torrent is unusable:
+        // "verifying" while a scan is actively running, "unverified" while it
+        // waits its turn.
+        if (m.torrent && !m.started) return "verifying";
+        if (!m.verified) return "unverified";
         if (!m.torrent) return "queued";
-        if (!m.started) return "checking";
         const complete = this.isComplete(m);
         if (this.mode === "scan") {
             if (complete) return "done";
@@ -905,6 +928,7 @@ export class TorrentManager extends EventEmitter {
             .then(() => {
                 m.started = true;
                 m.starting = false;
+                m.verified = true;
                 m.knownProgress = t.progress;
                 // Baseline the rate counters at the post-verification byte counts
                 // so the pieces we already had on disk aren't counted as a sudden
