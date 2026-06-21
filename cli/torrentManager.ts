@@ -35,6 +35,26 @@ export interface TorrentView {
     peerCount: number;
     error?: string;
     sourcePath: string;
+    creationDate: number;   // unix seconds (0 if the .torrent had none)
+}
+
+// The four scheduler buckets the list view is grouped into. A torrent is
+// "active" when it currently holds a slot; "complete" splits download vs seed.
+export type SectionKey = "downloading" | "willDownload" | "seeding" | "willSeed";
+
+export const SECTION_TITLES: Record<SectionKey, string> = {
+    downloading: "actively downloading",
+    willDownload: "will download (when we have a free download slot)",
+    seeding: "seeding",
+    willSeed: "will seed (when we have a free seed slot)",
+};
+
+export const SECTION_ORDER: SectionKey[] = ["downloading", "willDownload", "seeding", "willSeed"];
+
+export interface TorrentSection {
+    key: SectionKey;
+    title: string;
+    items: TorrentView[];
 }
 
 export interface AggregateView {
@@ -64,6 +84,11 @@ interface ManagedTorrent {
     sourcePath: string;
     meta: TorrentMeta;
     torrent?: Torrent;
+    // True once torrent.start() has resolved (initial check finished).
+    started: boolean;
+    // Last observed progress (0..1). Persists after the torrent is stopped so
+    // the scheduler still knows whether it's complete.
+    knownProgress: number;
     state: TorrentState;
     paused: boolean;
     error?: string;
@@ -128,6 +153,7 @@ export class TorrentManager extends EventEmitter {
             if (!m.torrent) continue;
             void m.torrent.stop().catch(() => {});
             m.torrent = undefined;
+            m.started = false;
             if (m.state !== "paused" && m.state !== "error") m.state = "queued";
         }
         this.emit("notice", `Mode → ${mode}`);
@@ -171,6 +197,8 @@ export class TorrentManager extends EventEmitter {
             meta,
             state: this.pausedPersisted.has(infoHash) ? "paused" : "queued",
             paused: this.pausedPersisted.has(infoHash),
+            started: false,
+            knownProgress: 0,
             listenPort: this.nextListenPort++,
             lastDown: 0,
             lastUp: 0,
@@ -205,6 +233,7 @@ export class TorrentManager extends EventEmitter {
             this.pausedPersisted.add(infoHash);
             await m.torrent?.stop().catch(() => {});
             m.torrent = undefined;
+            m.started = false;
             m.state = "paused";
         } else {
             this.pausedPersisted.delete(infoHash);
@@ -267,11 +296,14 @@ export class TorrentManager extends EventEmitter {
         const t = m.torrent;
         const size = m.meta.totalLength;
         const downloaded = t?.downloadedBytes ?? 0;
+        let progress = m.knownProgress;
+        if (t) progress = t.progress;
+        else if (size === 0) progress = 1;
         return {
             infoHash: m.infoHash,
             name: m.name,
             state: m.state,
-            progress: t ? t.progress : (size === 0 ? 1 : downloaded / size),
+            progress,
             sizeBytes: size,
             downloadedBytes: downloaded,
             uploadedBytes: t?.uploadedBytes ?? 0,
@@ -280,7 +312,41 @@ export class TorrentManager extends EventEmitter {
             peerCount: t?.peers.length ?? 0,
             error: m.error,
             sourcePath: m.sourcePath,
+            creationDate: m.meta.creationDate ?? 0,
         };
+    }
+
+    // Group every torrent into the four scheduler buckets and sort each by
+    // .torrent creation date, newest first. The list view renders these.
+    sections(): TorrentSection[] {
+        const buckets: Record<SectionKey, ManagedTorrent[]> = {
+            downloading: [], willDownload: [], seeding: [], willSeed: [],
+        };
+        for (const m of this.torrents.values()) buckets[this.sectionOf(m)].push(m);
+        return SECTION_ORDER.map((key) => ({
+            key,
+            title: SECTION_TITLES[key],
+            items: buckets[key]
+                .sort((a, b) => (b.meta.creationDate ?? 0) - (a.meta.creationDate ?? 0))
+                .map((m) => this.toView(m)),
+        }));
+    }
+
+    private sectionOf(m: ManagedTorrent): SectionKey {
+        const active = !!m.torrent;
+        const complete = this.isComplete(m);
+        if (complete) {
+            if (active) return "seeding";
+            return "willSeed";
+        }
+        if (active) return "downloading";
+        return "willDownload";
+    }
+
+    private isComplete(m: ManagedTorrent): boolean {
+        if (m.meta.totalLength === 0) return true;
+        const p = m.torrent ? m.torrent.progress : m.knownProgress;
+        return p >= 1;
     }
 
     private async tick(): Promise<void> {
@@ -301,7 +367,10 @@ export class TorrentManager extends EventEmitter {
                 m.upRate = RATE_ALPHA * uInst + (1 - RATE_ALPHA) * m.upRate;
                 m.lastDown = down;
                 m.lastUp = up;
-                if (m.state !== "paused" && m.state !== "error") {
+                m.knownProgress = t.progress;
+                // Leave the "checking" label in place until the initial check
+                // resolves; only then does the torrent settle into a steady state.
+                if (m.started && m.state !== "paused" && m.state !== "error") {
                     m.state = this.settledState(t);
                 }
             } else {
@@ -322,42 +391,81 @@ export class TorrentManager extends EventEmitter {
         return t.progress >= 1 ? "seeding" : "downloading";
     }
 
-    // qBittorrent-style active caps: count current actives, then fill spare
-    // slots from the queue (FIFO by insertion order) respecting per-category
-    // and total caps. Downloads are prioritized over seeds for the total cap.
-    // Only "full" mode is slot-limited; scan/connect bring up every torrent
-    // since they do bounded work and transfer no data.
+    // Slot scheduler. A torrent holds a download slot while incomplete (being
+    // checked or downloading) and a seed slot once complete. Slots cap how many
+    // torrents run at once in every mode, which also bounds open file handles.
+    // Scan mode does one-shot work, so a torrent releases its slot the moment
+    // its initial check finishes — letting the next queued torrent be checked.
     private runScheduler(): void {
         const all = [...this.torrents.values()];
-        if (this.mode !== "full") {
-            for (const m of all) {
-                if (m.paused || m.torrent || m.state === "error") continue;
-                this.startTorrent(m);
-            }
-            return;
-        }
-        const activeDownloads = all.filter((m) => m.torrent && m.state === "downloading").length;
-        const activeSeeds = all.filter((m) => m.torrent && m.state === "seeding").length;
-        let dlSlots = this.scheduler.maxActiveDownloads - activeDownloads;
-        let seedSlots = this.scheduler.maxActiveSeeds - activeSeeds;
-        let totalSlots = this.scheduler.maxActiveTotal - (activeDownloads + activeSeeds);
 
-        for (const m of all) {
-            if (totalSlots <= 0) break;
-            if (m.paused || m.torrent) continue;
-            if (m.state === "error") continue;
-            // We don't yet know if it's complete until we start + verify, so
-            // treat queued torrents as download candidates; a complete one will
-            // immediately flip to seeding on its first tick.
-            if (dlSlots <= 0) continue;
-            this.startTorrent(m);
-            dlSlots--;
-            totalSlots--;
+        if (this.mode === "scan") {
+            for (const m of all) {
+                if (m.torrent && m.started) this.releaseTorrent(m);
+            }
         }
-        // seedSlots is reserved for future split scheduling; complete torrents
-        // currently occupy download slots until they flip, which keeps the
-        // total cap honest. Referenced to avoid an unused-variable error.
-        void seedSlots;
+
+        // A completed download may push the seed bucket over its cap, or a mode
+        // switch may leave too many running; evict the oldest beyond each cap.
+        this.evictOverCap(all, false);
+        this.evictOverCap(all, true);
+
+        // Fill free slots from the queue, newest .torrent first. Scan mode only
+        // checks each torrent once, so already-scanned ones aren't restarted.
+        const startable = all
+            .filter((m) => {
+                if (m.paused || m.torrent || m.state === "error") return false;
+                if (this.mode === "scan" && (m.state === "checked" || m.state === "done")) return false;
+                return true;
+            })
+            .sort((a, b) => (b.meta.creationDate ?? 0) - (a.meta.creationDate ?? 0));
+        for (const m of startable) {
+            const wantSeed = this.isComplete(m);
+            if (this.freeSlots(all, wantSeed) <= 0) continue;
+            this.startTorrent(m);
+        }
+    }
+
+    // Count torrents currently occupying the given slot type. Complete running
+    // torrents use seed slots; incomplete running torrents use download slots.
+    private runningInSlot(all: ManagedTorrent[], seed: boolean): ManagedTorrent[] {
+        return all.filter((m) => m.torrent && this.isComplete(m) === seed);
+    }
+
+    private freeSlots(all: ManagedTorrent[], seed: boolean): number {
+        const cap = seed ? this.scheduler.seedSlots : this.scheduler.downloadSlots;
+        return cap - this.runningInSlot(all, seed).length;
+    }
+
+    // Stop the oldest running torrents that exceed a slot cap, returning them to
+    // the queue ("will download" / "will seed").
+    private evictOverCap(all: ManagedTorrent[], seed: boolean): void {
+        const cap = seed ? this.scheduler.seedSlots : this.scheduler.downloadSlots;
+        const running = this.runningInSlot(all, seed)
+            .sort((a, b) => (b.meta.creationDate ?? 0) - (a.meta.creationDate ?? 0));
+        for (const m of running.slice(cap)) this.releaseTorrent(m);
+    }
+
+    // Tear down a running torrent but remember its progress so it can be
+    // re-queued under the right slot type.
+    private releaseTorrent(m: ManagedTorrent): void {
+        if (m.torrent) m.knownProgress = m.torrent.progress;
+        void m.torrent?.stop().catch(() => {});
+        m.torrent = undefined;
+        m.started = false;
+        if (m.paused || m.state === "error") return;
+        m.state = this.idleState(m);
+    }
+
+    // The label a torrent shows while it sits in the queue without a slot.
+    private idleState(m: ManagedTorrent): TorrentState {
+        if (this.mode === "scan") {
+            if (this.isComplete(m)) return "done";
+            return "checked";
+        }
+        if (this.mode === "connect") return "ready";
+        if (this.isComplete(m)) return "done";
+        return "queued";
     }
 
     private startTorrent(m: ManagedTorrent): void {
@@ -382,6 +490,8 @@ export class TorrentManager extends EventEmitter {
         });
         t.start()
             .then(() => {
+                m.started = true;
+                m.knownProgress = t.progress;
                 if (m.state !== "paused" && m.state !== "error") m.state = this.settledState(t);
                 this.emit("update");
             })
@@ -389,6 +499,7 @@ export class TorrentManager extends EventEmitter {
                 m.error = e.message;
                 m.state = "error";
                 m.torrent = undefined;
+                m.started = false;
                 this.emit("update");
             });
     }

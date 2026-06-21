@@ -54,7 +54,13 @@ export function App(props: AppProps) {
 
     const allViews = manager.views();
     const norm = normalizeForFilter(filter);
-    const views = norm ? allViews.filter((v) => normalizeForFilter(v.name).includes(norm)) : allViews;
+    const allSections = manager.sections();
+    const sections = allSections.map((s) => ({
+        ...s,
+        items: norm ? s.items.filter((v) => normalizeForFilter(v.name).includes(norm)) : s.items,
+    }));
+    // Flatten in section order for keyboard navigation.
+    const views = sections.flatMap((s) => s.items);
 
     // Clamp selection to the filtered list.
     const clampedIndex = Math.min(selectedIndex, Math.max(0, views.length - 1));
@@ -113,7 +119,7 @@ export function App(props: AppProps) {
                 {mode === "detail" && detail && detailViewModel ? (
                     <DetailView view={detailViewModel} detail={detail} tab={tab} scroll={scroll} width={width} height={bodyHeight} />
                 ) : (
-                    <TorrentTable views={views} selectedIndex={clampedIndex} width={width} height={bodyHeight} />
+                    <TorrentTable sections={sections} selectedHash={selected?.infoHash} width={width} height={bodyHeight} />
                 )}
             </Box>
             <Footer
