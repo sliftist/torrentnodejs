@@ -10,6 +10,7 @@
         "scan": "typenode ./cli/index.tsx scan",
         "scrape": "typenode ./cli/index.tsx scrape",
         "cli-smoke": "typenode ./cli/smokeTest.ts",
+        "web-smoke": "typenode ./scripts/webServerSmoke.ts",
         "fetch-corpus": "typenode ./scripts/fetchCorpus.ts",
         "type": "yarn tsc --noEmit",
         "test": "typenode ./test/runTests.ts"
@@ -18,13 +19,16 @@
         "ink": "^3.2.0",
         "ink-text-input": "^4.0.3",
         "react": "^17.0.2",
+        "selfsigned": "^5.5.0",
         "typenode": "*",
         "wireguardnodejs": "git+ssh://git@github.com/sliftist/wireguardnodejs.git#main",
+        "ws": "^8.21.0",
         "yaml": "^2.4.0"
     },
     "devDependencies": {
         "@types/node": "^22.0.0",
         "@types/react": "^17.0.0",
+        "@types/ws": "^8.18.1",
         "typescript": "^5.4.0"
     }
 }

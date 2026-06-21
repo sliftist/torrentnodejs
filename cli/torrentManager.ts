@@ -4,7 +4,7 @@ import path from "path";
 import { readFile, writeFile } from "fs/promises";
 import { Transport } from "../transport";
 import { Torrent, RunMode } from "../torrent";
-import { TorrentMeta, parseTorrentFile } from "../torrentFile";
+import { TorrentMeta, parseTorrentFile, pieceLengthAt } from "../torrentFile";
 import { PeerListener } from "../peerListener";
 import { RateLimiter } from "../rateLimiter";
 import { ChokeManager } from "../chokeManager";
@@ -172,6 +172,12 @@ export class TorrentManager extends EventEmitter {
     private readonly torrents = new Map<string, ManagedTorrent>();
     private readonly bySource = new Map<string, string>();
     private pausedPersisted = new Set<string>();
+    // Torrents the web client asked to prioritize: each is guaranteed a download
+    // slot and (collectively) up to half the download bandwidth.
+    private readonly prioritized = new Set<string>();
+    // Torrents with an in-flight web block request: infoHash -> pending count.
+    // While pending they're guaranteed a slot (but don't get the bandwidth split).
+    private readonly forcedSlots = new Map<string, number>();
     private ticker?: NodeJS.Timeout;
     private lastTickMs = Date.now();
     private stopped = false;
@@ -191,6 +197,8 @@ export class TorrentManager extends EventEmitter {
     // Shared services, created on start().
     private peerListener?: PeerListener;
     private downloadLimiter?: RateLimiter;
+    // Dedicated bucket for prioritized torrents: half the global download rate.
+    private priorityDownloadLimiter?: RateLimiter;
     private uploadLimiter?: RateLimiter;
     private chokeManager?: ChokeManager;
     private connectionBudget?: ConnectionBudget;
@@ -238,6 +246,7 @@ export class TorrentManager extends EventEmitter {
             this.peerListener = undefined;
         });
         this.downloadLimiter = new RateLimiter(this.scheduler.downloadMbps * BYTES_PER_MBIT);
+        this.priorityDownloadLimiter = new RateLimiter((this.scheduler.downloadMbps * BYTES_PER_MBIT) / 2);
         this.uploadLimiter = new RateLimiter(this.scheduler.uploadMbps * BYTES_PER_MBIT);
         this.connectionBudget = new ConnectionBudget(this.scheduler.activeConnections);
         this.dialStats = new DialStats();
@@ -330,6 +339,145 @@ export class TorrentManager extends EventEmitter {
         }
         await this.saveState();
         this.emit("update");
+    }
+
+    // ---- web-control prioritization ----
+
+    // Mark a torrent as prioritized (or clear it): it's guaranteed a download
+    // slot and shares (with any other prioritized torrents) up to half the
+    // global download bandwidth.
+    setPriority(infoHash: string, on: boolean): void {
+        const m = this.torrents.get(infoHash);
+        if (!m) throw new Error(`Unknown torrent ${infoHash}`);
+        if (on) {
+            this.prioritized.add(infoHash);
+            // Jump to the front so it also wins the regular queue ordering.
+            m.queueOrder = --this.frontSeq;
+        } else {
+            this.prioritized.delete(infoHash);
+        }
+        this.applyBandwidthSplit();
+        this.applyLimiter(m);
+        this.runScheduler(Date.now());
+        this.emit("update");
+    }
+
+    // Fetch one specific block, prioritizing its piece. Resolves once the piece
+    // has downloaded and verified; may take a while on a slow torrent.
+    async requestBlock(config: { infoHash: string; pieceIndex: number; begin: number; length: number }): Promise<Buffer> {
+        const { infoHash, pieceIndex, begin, length } = config;
+        const m = this.torrents.get(infoHash);
+        if (!m) throw new Error(`Unknown torrent ${infoHash}`);
+        const numPieces = m.meta.pieceHashes.length;
+        if (pieceIndex < 0 || pieceIndex >= numPieces) {
+            throw new Error(`pieceIndex out of range: ${pieceIndex}, expected 0..${numPieces - 1}`);
+        }
+        const pieceLen = pieceLengthAt(m.meta, pieceIndex);
+        if (begin < 0 || length <= 0 || begin + length > pieceLen) {
+            throw new Error(`block [${begin}, ${begin + length}) out of bounds for piece ${pieceIndex} of length ${pieceLen}`);
+        }
+
+        this.forcedSlots.set(infoHash, (this.forcedSlots.get(infoHash) || 0) + 1);
+        try {
+            const t = await this.ensureStartedTorrent(m);
+            if (!t.pieceManager.selected.has(pieceIndex)) {
+                throw new Error(`piece ${pieceIndex} is not in this torrent's selection`);
+            }
+            t.pieceManager.prioritizePiece(pieceIndex);
+            this.runScheduler(Date.now());
+            t.kickRequests();
+            if (!t.pieceManager.haveBitfield.get(pieceIndex)) {
+                await this.waitForPiece(t, pieceIndex);
+            }
+            return await t.storage.readBlock(pieceIndex, begin, length);
+        } finally {
+            const remaining = (this.forcedSlots.get(infoHash) || 1) - 1;
+            if (remaining <= 0) this.forcedSlots.delete(infoHash);
+            else this.forcedSlots.set(infoHash, remaining);
+            this.runScheduler(Date.now());
+        }
+    }
+
+    isPrioritized(infoHash: string): boolean {
+        return this.prioritized.has(infoHash);
+    }
+
+    private mustHaveSlot(m: ManagedTorrent): boolean {
+        return this.prioritized.has(m.infoHash) || this.forcedSlots.has(m.infoHash);
+    }
+
+    private applyBandwidthSplit(): void {
+        if (!this.downloadLimiter) return;
+        const full = this.scheduler.downloadMbps * BYTES_PER_MBIT;
+        let sharedRate = full;
+        if (this.prioritized.size > 0) sharedRate = full / 2;
+        this.downloadLimiter.setRate(sharedRate);
+        this.priorityDownloadLimiter?.setRate(full / 2);
+    }
+
+    private applyLimiter(m: ManagedTorrent): void {
+        if (!m.torrent) return;
+        let limiter = this.downloadLimiter;
+        if (this.prioritized.has(m.infoHash)) limiter = this.priorityDownloadLimiter;
+        m.torrent.setDownloadLimiter(limiter);
+    }
+
+    private async ensureStartedTorrent(m: ManagedTorrent): Promise<Torrent> {
+        this.runScheduler(Date.now());
+        await this.waitForCondition(() => {
+            if (m.error) throw new Error(`Torrent ${m.infoHash} failed: ${m.error}`);
+            return Boolean(m.torrent && m.started);
+        });
+        const t = m.torrent;
+        if (!t) throw new Error(`Torrent ${m.infoHash} failed to start`);
+        return t;
+    }
+
+    // Resolves when `predicate` becomes true, re-checking on every manager
+    // "update" (~1/s plus on events). Rejects if the predicate throws.
+    private waitForCondition(predicate: () => boolean): Promise<void> {
+        return new Promise<void>((resolve, reject) => {
+            const check = () => {
+                let done = false;
+                try {
+                    done = predicate();
+                } catch (e) {
+                    this.off("update", check);
+                    reject(e as Error);
+                    return;
+                }
+                if (done) {
+                    this.off("update", check);
+                    resolve();
+                }
+            };
+            this.on("update", check);
+            check();
+        });
+    }
+
+    private waitForPiece(t: Torrent, pieceIndex: number): Promise<void> {
+        return new Promise<void>((resolve, reject) => {
+            const onPiece = (i: number) => {
+                if (i !== pieceIndex) return;
+                cleanup();
+                resolve();
+            };
+            const onError = (e: Error) => {
+                cleanup();
+                reject(e);
+            };
+            const cleanup = () => {
+                t.off("piece", onPiece);
+                t.off("error", onError);
+            };
+            t.on("piece", onPiece);
+            t.on("error", onError);
+            if (t.pieceManager.haveBitfield.get(pieceIndex)) {
+                cleanup();
+                resolve();
+            }
+        });
     }
 
     // ---- snapshots for the TUI ----
@@ -563,21 +711,27 @@ export class TorrentManager extends EventEmitter {
             if (m.downloadEnabled && !this.eligibleForSlot(m)) this.setSlot(m, false, now);
         }
 
+        // Prioritized / block-request torrents always get a slot, even past the
+        // global cap; they're never evicted below.
+        for (const m of torrents) {
+            if (this.mustHaveSlot(m) && this.eligibleForSlot(m) && !m.downloadEnabled) this.setSlot(m, true, now);
+        }
+
         let waiters = torrents
-            .filter((m) => this.eligibleForSlot(m) && !m.downloadEnabled)
+            .filter((m) => this.eligibleForSlot(m) && !m.downloadEnabled && !this.mustHaveSlot(m))
             .sort((a, b) => a.queueOrder - b.queueOrder);
 
         // Evict stalled holders only when something is waiting to take the slot.
         if (waiters.length > 0) {
             for (const h of torrents) {
-                if (!h.downloadEnabled) continue;
+                if (!h.downloadEnabled || this.mustHaveSlot(h)) continue;
                 if (now - h.lastProgressAtMs > this.scheduler.downloadSkipLimitMs) {
                     this.setSlot(h, false, now);
                     h.queueOrder = ++this.backSeq;
                 }
             }
             waiters = torrents
-                .filter((m) => this.eligibleForSlot(m) && !m.downloadEnabled)
+                .filter((m) => this.eligibleForSlot(m) && !m.downloadEnabled && !this.mustHaveSlot(m))
                 .sort((a, b) => a.queueOrder - b.queueOrder);
         }
 
@@ -655,6 +809,9 @@ export class TorrentManager extends EventEmitter {
                 m.started = true;
                 m.starting = false;
                 m.knownProgress = t.progress;
+                // A torrent prioritized before it started gets its half-rate
+                // limiter now that the instance exists.
+                this.applyLimiter(m);
                 this.emit("update");
             })
             .catch((e: Error) => {

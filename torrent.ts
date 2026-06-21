@@ -150,6 +150,18 @@ export class Torrent extends EventEmitter {
         if (enabled) for (const key of this.peerConnections.keys()) void this.pumpRequests(key);
     }
 
+    // Swap the download (request-pacing) limiter, e.g. to give a prioritized
+    // torrent its own half-bandwidth bucket.
+    setDownloadLimiter(limiter?: RateLimiter): void {
+        this.options.downloadLimiter = limiter;
+    }
+
+    // Nudge every peer to re-pick blocks now (used after a priority change so a
+    // newly-requested piece is fetched immediately rather than on the next event).
+    kickRequests(): void {
+        for (const key of this.peerConnections.keys()) void this.pumpRequests(key);
+    }
+
     get peers(): { ip: string; port: number }[] {
         return [...this.peerMeta.values()].map((m) => ({ ip: m.ip, port: m.port }));
     }

@@ -15,6 +15,9 @@ export interface AppProps {
     localIP: string;
     // Persist a newly-added source folder to config + start watching it.
     onAddSource: (folder: string) => void;
+    // Connection details for the web-control server, shown via an action.
+    webUrl?: string;
+    webPassword?: string;
 }
 
 type View = "list" | "detail";
@@ -32,7 +35,7 @@ const RENDER_THROTTLE_MS = 70;
 const MENU_WIDTH = 36;
 
 export function App(props: AppProps) {
-    const { manager, watcher, localIP, onAddSource } = props;
+    const { manager, watcher, localIP, onAddSource, webUrl, webPassword } = props;
     const { exit } = useApp();
     const { stdout } = useStdout();
 
@@ -141,11 +144,22 @@ export function App(props: AppProps) {
             if (view === "list") acts.push({ label: "Open details", run: () => openDetail(f) });
             const paused = f.state === "paused";
             acts.push({
-                label: paused ? "Resume" : "Pause",
+                label: paused && "Resume" || "Pause",
                 run: () => { setOverlay("none"); void manager.togglePause(f.infoHash); },
+            });
+            const prioritized = manager.isPrioritized(f.infoHash);
+            acts.push({
+                label: prioritized && "Unprioritize" || "Prioritize (web)",
+                run: () => { setOverlay("none"); manager.setPriority(f.infoHash, !prioritized); },
             });
         }
         acts.push({ label: "Add folder…", run: () => { setFolderDraft(""); setOverlay("addFolder"); } });
+        if (webUrl && webPassword) {
+            acts.push({
+                label: "Show web password",
+                run: () => { setOverlay("none"); setNotice(`Web control: ${webUrl}  ·  password: ${webPassword}`); },
+            });
+        }
         acts.push({
             label: `Switch mode (now: ${manager.runMode})`,
             run: () => { setOverlay("none"); manager.setMode(nextRunMode(manager.runMode)); },

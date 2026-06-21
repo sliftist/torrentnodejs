@@ -67,6 +67,8 @@ export class PieceManager extends EventEmitter {
     private readonly rarityCounts: Map<number, number> = new Map();
     private readonly peerBitfields = new Map<string, Bitfield>();
     private readonly inflight = new Map<string, InflightEntry>(); // key = `${piece}:${blockIndex}:${peerId}`
+    // Pieces a web client explicitly requested; picked before everything else.
+    private readonly priorityPieces = new Set<number>();
     private downloadedBytesField = 0;
 
     constructor(
@@ -218,11 +220,35 @@ export class PieceManager extends EventEmitter {
         return returned;
     }
 
+    // Mark a piece as priority so the next requests fetch it ahead of the normal
+    // rarest-first order. No-op for pieces outside the selection.
+    prioritizePiece(pieceIndex: number): void {
+        if (pieceIndex < 0 || pieceIndex >= this.numPieces) return;
+        if (!this.selected.has(pieceIndex)) return;
+        if (this.progress[pieceIndex].state === "done") return;
+        this.priorityPieces.add(pieceIndex);
+    }
+
     // Pick the next block to request from this peer. Rarest-first across
     // pieces they have AND we need, falling back to random among rarest.
     pickBlock(peerId: string): BlockRequest | undefined {
         const peerBf = this.peerBitfields.get(peerId);
         if (!peerBf) return undefined;
+
+        // Priority pass: explicitly-requested pieces win, even during endgame.
+        for (const i of this.priorityPieces) {
+            const p = this.progress[i];
+            if (p.state === "done") { this.priorityPieces.delete(i); continue; }
+            if (!peerBf.get(i)) continue;
+            if (p.state === "needed") {
+                p.state = "downloading";
+                p.buffer = Buffer.alloc(pieceLengthAt(this.meta, i));
+            }
+            const blockIdx = nextNeededBlock(p);
+            if (blockIdx < 0) continue;
+            return { pieceIndex: i, begin: blockIdx * BLOCK_SIZE, length: p.blocks[blockIdx].length };
+        }
+
         if (this.inEndgame()) return this.pickBlockEndgame(peerBf, peerId);
         const candidates: { pieceIndex: number; rarity: number }[] = [];
         let minRarity = Infinity;

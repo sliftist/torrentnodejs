@@ -65,6 +65,8 @@ export interface Config {
     sources: string[];
     // TCP port we ask WireGuard to listen on for inbound peers (seeding).
     listenPort: number;
+    // Public-interface HTTPS/WebSocket port for the web-control command server.
+    webPort: number;
     scheduler: SchedulerSettings;
 }
 
@@ -101,6 +103,7 @@ export async function loadConfig(dir = process.cwd()): Promise<Config> {
         downloadDir: expandHome(parsed.downloadDir),
         sources: (parsed.sources || []).map(expandHome),
         listenPort: parsed.listenPort ?? 6881,
+        webPort: parsed.webPort ?? 8443,
         scheduler: { ...DEFAULT_SCHEDULER, ...(parsed.scheduler || {}) },
     };
 }

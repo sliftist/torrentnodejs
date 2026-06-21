@@ -39,6 +39,7 @@ async function main() {
         downloadDir,
         sources: [sourceDir],
         listenPort: 6881,
+        webPort: 8443,
         scheduler: { ...DEFAULT_SCHEDULER },
     };
     await saveConfig(cfg, work);

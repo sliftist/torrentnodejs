@@ -34,6 +34,7 @@ export async function runFirstRunSetup(): Promise<Config> {
             downloadDir,
             sources: [],
             listenPort: 6881,
+            webPort: 8443,
             scheduler: { ...DEFAULT_SCHEDULER },
         };
         await saveConfig(config);

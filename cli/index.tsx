@@ -7,6 +7,7 @@ import { SourceWatcher } from "./watcher";
 import { Config, configExists, loadConfig, saveConfig, expandHome, parseRunMode, MODE_LABEL, MODE_DESC } from "./config";
 import { runFirstRunSetup } from "./setup";
 import { WgTransport } from "./wgTransport";
+import { WebCommandServer } from "./web/webServer";
 
 async function main() {
     const mode = parseRunMode(process.argv[2]);
@@ -39,6 +40,21 @@ async function main() {
     await manager.start();
     watcher.start();
 
+    // Public-interface HTTPS/WebSocket control server. This is the one component
+    // allowed to listen and talk OUTSIDE the WireGuard tunnel; the word-password
+    // (cached in ~/.bittorrent) gates every command.
+    const webServer = new WebCommandServer({ manager, port: config.webPort });
+    let webUrl: string | undefined;
+    let webPassword: string | undefined;
+    try {
+        await webServer.start();
+        webPassword = webServer.password;
+        webUrl = `wss://<this-host>:${config.webPort}`;
+        process.stdout.write(`Web control on port ${config.webPort}. Password: ${webPassword}\n`);
+    } catch (e) {
+        process.stdout.write(`Web control failed to start: ${(e as Error).message}\n`);
+    }
+
     const onAddSource = (folder: string) => {
         const resolved = expandHome(folder);
         if (!config.sources.includes(resolved)) {
@@ -49,13 +65,21 @@ async function main() {
     };
 
     const app = render(
-        <App manager={manager} watcher={watcher} localIP={wg.localIP} onAddSource={onAddSource} />,
+        <App
+            manager={manager}
+            watcher={watcher}
+            localIP={wg.localIP}
+            onAddSource={onAddSource}
+            webUrl={webUrl}
+            webPassword={webPassword}
+        />,
         { exitOnCtrlC: false },
     );
 
     await app.waitUntilExit();
 
     watcher.stop();
+    await webServer.stop();
     await manager.stop();
     wg.close();
     process.exit(0);
