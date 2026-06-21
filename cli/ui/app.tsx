@@ -19,6 +19,10 @@ export interface AppProps {
 
 type Mode = "list" | "detail";
 
+// Cap UI redraws to ~14 fps. Coalesces bursts of manager "update" events into a
+// single render so input stays responsive during mass torrent state changes.
+const RENDER_THROTTLE_MS = 70;
+
 export function App(props: AppProps) {
     const { manager, watcher, localIP, onAddSource } = props;
     const { exit } = useApp();
@@ -35,11 +39,26 @@ export function App(props: AppProps) {
     const [notice, setNotice] = useState<string>("");
 
     useEffect(() => {
-        const onUpdate = () => setTick((t) => t + 1);
+        // The manager fires "update" once per torrent state change, so a batch
+        // operation (e.g. switching modes restarts every torrent) emits a burst
+        // — hundreds at once with thousands of torrents. Re-rendering the whole
+        // TUI synchronously on each one starves the event loop and freezes input.
+        // Coalesce the burst into at most one render per frame; a trailing timer
+        // guarantees the final state is drawn once the burst settles.
+        let scheduled: NodeJS.Timeout | undefined;
+        const onUpdate = () => {
+            if (scheduled) return;
+            scheduled = setTimeout(() => {
+                scheduled = undefined;
+                setTick((t) => t + 1);
+            }, RENDER_THROTTLE_MS);
+            scheduled.unref?.();
+        };
         const onNotice = (msg: string) => setNotice(msg);
         manager.on("update", onUpdate);
         manager.on("notice", onNotice);
         return () => {
+            if (scheduled) clearTimeout(scheduled);
             manager.off("update", onUpdate);
             manager.off("notice", onNotice);
         };

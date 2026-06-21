@@ -8,7 +8,7 @@
         "torrent": "typenode ./cli/index.tsx",
         "cli": "typenode ./cli/index.tsx",
         "scan": "typenode ./cli/index.tsx scan",
-        "connect": "typenode ./cli/index.tsx connect",
+        "scrape": "typenode ./cli/index.tsx scrape",
         "cli-smoke": "typenode ./cli/smokeTest.ts",
         "fetch-corpus": "typenode ./scripts/fetchCorpus.ts",
         "type": "yarn tsc --noEmit",

@@ -13,13 +13,13 @@ import { ConnectionBudget } from "./connectionBudget";
 import { DialStats } from "./dialStats";
 
 // How many lifecycle phases the torrent actually runs:
-//  - "scan":    open + SHA-1 verify on-disk pieces only. No network at all.
-//  - "connect": scan, then SCRAPE trackers for swarm stats (seeders/leechers/
-//               peers). It never announces, never dials or accepts peers, and
-//               transfers no data — just gathers swarm info before going full.
-//  - "full":    every phase — announce, connect to peers, download and upload
-//               (default).
-export type RunMode = "scan" | "connect" | "full";
+//  - "scan":   open + SHA-1 verify on-disk pieces only. No network at all.
+//  - "scrape": scan, then SCRAPE trackers for swarm stats (seeders/leechers/
+//              peers). It never announces, never dials or accepts peers, and
+//              transfers no data — just gathers swarm info before going full.
+//  - "full":   every phase — announce, connect to peers, download and upload
+//              (default).
+export type RunMode = "scan" | "scrape" | "full";
 
 export interface TorrentOptions {
     saveDir: string;
@@ -118,8 +118,8 @@ export class Torrent extends EventEmitter {
         this.tracker = new TrackerPool({
             transport: this.transport,
             trackers: config.meta.announceList,
-            // Connect mode gathers swarm stats without joining the swarm.
-            scrape: (config.options.mode ?? "full") === "connect",
+            // Scrape mode gathers swarm stats without joining the swarm.
+            scrape: (config.options.mode ?? "full") === "scrape",
             params: () => ({
                 infoHash: this.meta.infoHash,
                 peerId: this.peerId,
@@ -233,10 +233,10 @@ export class Torrent extends EventEmitter {
 
         this.tracker.on("tracker-error", (e: { url: string; error: Error }) => this.emit("tracker-error", e));
 
-        // Connect mode only scrapes the trackers for swarm stats — no listener,
+        // Scrape mode only scrapes the trackers for swarm stats — no listener,
         // no peer connections, no announce. Start the (scrape-configured) pool
         // and stop.
-        if (mode === "connect") {
+        if (mode === "scrape") {
             this.tracker.start();
             return;
         }

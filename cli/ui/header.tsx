@@ -1,7 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { AggregateView } from "../torrentManager";
-import { RunMode, MODE_LABEL, MODE_DESC } from "../config";
+import { RunMode, RUN_MODES, MODE_LABEL, MODE_DESC } from "../config";
 import { formatBytes, formatRate, formatNumber } from "./format";
 
 export function Header(props: { agg: AggregateView; localIP: string; width: number; mode: RunMode }) {
@@ -15,8 +15,21 @@ export function Header(props: { agg: AggregateView; localIP: string; width: numb
                 <Text color="green">{localIP}</Text>
             </Box>
             <Box>
-                <Text backgroundColor={full ? "green" : "yellow"} color="black" bold>{` MODE: ${MODE_LABEL[mode]} `}</Text>
-                <Text color={full ? "green" : "yellow"}>{` ${full ? "" : "⚠ "}${MODE_DESC[mode]} · Tab to change`}</Text>
+                <Text dimColor>MODE </Text>
+                {RUN_MODES.map((m) => {
+                    const active = m === mode;
+                    const activeColor = m === "full" ? "green" : "yellow";
+                    return (
+                        <Text
+                            key={m}
+                            backgroundColor={active ? activeColor : undefined}
+                            color={active ? "black" : "gray"}
+                            bold={active}
+                            dimColor={!active}
+                        >{` ${MODE_LABEL[m]} `}</Text>
+                    );
+                })}
+                <Text color={full ? "green" : "yellow"}>{`  ${full ? "" : "⚠ "}${MODE_DESC[mode]} · Tab to change`}</Text>
             </Box>
             <Box>
                 <Text>{`torrents ${agg.torrents}  `}</Text>

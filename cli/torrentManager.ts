@@ -28,7 +28,7 @@ export type TorrentState =
     | "queued"
     | "checking"
     | "checked"      // scan-mode: drive verified, incomplete
-    | "ready"        // connect-mode: peers known, no transfers
+    | "ready"        // scrape-mode: swarm stats gathered, no transfers
     | "downloading"  // holds a download slot, fetching blocks
     | "seeding"      // complete, uploaded recently
     | "idle"         // complete, no recent uploads
@@ -467,7 +467,7 @@ export class TorrentManager extends EventEmitter {
             if (complete) return "done";
             return "checked";
         }
-        if (this.mode === "connect") return "ready";
+        if (this.mode === "scrape") return "ready";
         if (complete) {
             if (this.uploadedRecently(m)) return "seeding";
             return "idle";
@@ -539,7 +539,7 @@ export class TorrentManager extends EventEmitter {
         const torrents = [...this.torrents.values()];
         this.ensureStarted(torrents);
 
-        // Download slots only apply in full mode (scan/connect never transfer).
+        // Download slots only apply in full mode (scan/scrape never transfer).
         if (this.mode !== "full") return;
 
         // Release slots held by torrents that can no longer use one.
