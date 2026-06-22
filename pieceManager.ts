@@ -70,6 +70,10 @@ export class PieceManager extends EventEmitter {
     // Pieces a web client explicitly requested; picked before everything else.
     private readonly priorityPieces = new Set<number>();
     private downloadedBytesField = 0;
+    // Running block accounting so inEndgame() is O(1) instead of rescanning every
+    // selected piece's blocks on every single pickBlock call.
+    private totalSelectedBlocks = 0;
+    private haveBlocksCount = 0;
 
     constructor(
         private readonly meta: TorrentMeta,
@@ -91,6 +95,7 @@ export class PieceManager extends EventEmitter {
             for (let off = 0; off < pl; off += BLOCK_SIZE) {
                 blocks.push({ length: Math.min(BLOCK_SIZE, pl - off), have: false, inflight: 0 });
             }
+            this.totalSelectedBlocks += blocks.length;
             this.progress.push({ state: "needed", blocks, receivedBytes: 0 });
         }
     }
@@ -120,15 +125,10 @@ export class PieceManager extends EventEmitter {
         return counts;
     }
 
-    // Blocks we still don't have across every not-done selected piece.
+    // Blocks we still don't have across every not-done selected piece. A done
+    // piece's blocks are all marked have, so this is just total minus have.
     remainingBlocks(): number {
-        let n = 0;
-        for (const i of this.selected) {
-            const p = this.progress[i];
-            if (p.state === "done") continue;
-            for (const b of p.blocks) if (!b.have) n++;
-        }
-        return n;
+        return this.totalSelectedBlocks - this.haveBlocksCount;
     }
 
     inEndgame(): boolean {
@@ -142,10 +142,21 @@ export class PieceManager extends EventEmitter {
     markAllSelectedDone(): void {
         for (const i of this.selected) {
             if (this.progress[i].state === "done") continue;
+            this.markBlocksHave(this.progress[i]);
             this.progress[i].state = "done";
             this.progress[i].buffer = undefined;
             this.haveBitfield.set(i);
             this.downloadedBytesField += pieceLengthAt(this.meta, i);
+        }
+    }
+
+    // Flip every not-yet-have block of a piece to have, keeping the running
+    // have-block counter in sync (used when a whole piece becomes done at once).
+    private markBlocksHave(piece: PieceProgress): void {
+        for (const b of piece.blocks) {
+            if (b.have) continue;
+            b.have = true;
+            this.haveBlocksCount++;
         }
     }
 
@@ -157,6 +168,7 @@ export class PieceManager extends EventEmitter {
         for (const i of this.selected) {
             if (!have.get(i)) continue;
             if (this.progress[i].state === "done") continue;
+            this.markBlocksHave(this.progress[i]);
             this.progress[i].state = "done";
             this.progress[i].buffer = undefined;
             this.haveBitfield.set(i);
@@ -203,7 +215,7 @@ export class PieceManager extends EventEmitter {
             this.peerBitfields.delete(peerId);
         }
         const returned: BlockRequest[] = [];
-        for (const [key, entry] of [...this.inflight]) {
+        for (const [key, entry] of this.inflight) {
             if (entry.peerId !== peerId) continue;
             const piece = this.progress[entry.pieceIndex];
             const block = piece.blocks[entry.blockIndex];
@@ -337,6 +349,7 @@ export class PieceManager extends EventEmitter {
 
         data.copy(piece.buffer, req.begin);
         block.have = true;
+        this.haveBlocksCount++;
         block.inflight = 0;
         piece.receivedBytes += data.length;
         this.downloadedBytesField += data.length;
@@ -345,7 +358,7 @@ export class PieceManager extends EventEmitter {
         // pending on OTHER peers (endgame duplicates) are reported so the caller
         // can send cancels.
         const canceled: CanceledRequest[] = [];
-        for (const [key, entry] of [...this.inflight]) {
+        for (const [key, entry] of this.inflight) {
             if (entry.pieceIndex === req.pieceIndex && entry.blockIndex === blockIndex) {
                 if (entry.peerId !== peerId) {
                     canceled.push({ peerId: entry.peerId, pieceIndex: req.pieceIndex, begin: req.begin, length: block.length });
@@ -386,7 +399,7 @@ export class PieceManager extends EventEmitter {
 
     private resetPiece(pieceIndex: number): void {
         const piece = this.progress[pieceIndex];
-        for (const b of piece.blocks) { b.have = false; b.inflight = 0; }
+        for (const b of piece.blocks) { if (b.have) this.haveBlocksCount--; b.have = false; b.inflight = 0; }
         piece.receivedBytes = 0;
         piece.state = "needed";
         piece.buffer = undefined;

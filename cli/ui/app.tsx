@@ -116,7 +116,6 @@ export function App(props: AppProps) {
         return () => { stdout.off("resize", onResize); };
     }, [stdout]);
 
-    const allViews = manager.views();
     const norm = normalizeForFilter(filter);
     const allSections = manager.sections();
     const sections = allSections.map((s) => ({
@@ -152,7 +151,7 @@ export function App(props: AppProps) {
 
     const detail = view === "detail" && selectedHash ? manager.detail(selectedHash) : undefined;
     const detailViewModel = view === "detail" && selectedHash
-        ? views.find((v) => v.infoHash === selectedHash) ?? allViews.find((v) => v.infoHash === selectedHash)
+        ? views.find((v) => v.infoHash === selectedHash) ?? manager.views().find((v) => v.infoHash === selectedHash)
         : undefined;
     // The torrent that context actions (pause, open) apply to.
     const focusTorrent = view === "detail" ? detailViewModel : selected;

@@ -547,7 +547,7 @@ export class Torrent extends EventEmitter {
         }
         if (result.kind === "complete") {
             await this.storage.writePiece(index, result.piece);
-            await this.storage.finalizeFiles(this.pieceManager.haveBitfield);
+            await this.storage.finalizeFiles(this.pieceManager.haveBitfield, index);
             for (const c of this.peerConnections.values()) c.sendHave(index);
             this.emit("piece", index);
             if (this.pieceManager.isComplete()) this.emit("complete");

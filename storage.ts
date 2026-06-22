@@ -234,9 +234,12 @@ export class Storage {
     // Rename every file whose pieces are all present (per `have`) from the temp
     // dir into its final location. Idempotent — already-finalized files are
     // skipped. Once nothing remains in the temp dir it is removed.
-    async finalizeFiles(have: Bitfield): Promise<void> {
+    async finalizeFiles(have: Bitfield, completedPiece?: number): Promise<void> {
         if (!this.opened) throw new Error("Storage not open");
-        for (const plan of this.filePlans) {
+        // A single completed piece can only finish the file(s) it overlaps, so the
+        // per-piece path narrows to those instead of re-scanning every file.
+        const plans = completedPiece === undefined ? this.filePlans : this.plansForPiece(completedPiece);
+        for (const plan of plans) {
             if (!plan.allocated || plan.finalized) continue;
             if (!this.fileComplete(plan.file, have)) continue;
             // Claim the rename synchronously, before any await, so concurrent

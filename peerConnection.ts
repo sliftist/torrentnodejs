@@ -219,6 +219,11 @@ export class PeerConnection extends EventEmitter {
     private onData(chunk: Buffer): void {
         if (this.buffer.length === 0) this.buffer = Buffer.from(chunk);
         else this.buffer = Buffer.concat([this.buffer, chunk]);
+        // Walk the accumulated buffer with a read cursor, parsing every complete
+        // message in place, and compact only once at the end for whatever partial
+        // remains — instead of reallocating the tail after each message (which was
+        // quadratic when a fast peer batched many piece messages into one chunk).
+        let offset = 0;
         if (!this.handshakeDone) {
             if (this.buffer.length < HANDSHAKE_LEN) return;
             let result: { reserved: Buffer; infoHash: Buffer; peerId: Buffer };
@@ -234,13 +239,13 @@ export class PeerConnection extends EventEmitter {
             }
             (this as { remotePeerId: Buffer }).remotePeerId = result.peerId;
             this.handshakeDone = true;
-            this.buffer = Buffer.from(this.buffer.subarray(HANDSHAKE_LEN));
+            offset = HANDSHAKE_LEN;
             this.emit("handshake", result.peerId);
         }
-        while (this.buffer.length >= 4) {
-            const msgLen = this.buffer.readUInt32BE(0);
+        while (this.buffer.length - offset >= 4) {
+            const msgLen = this.buffer.readUInt32BE(offset);
             if (msgLen === 0) {
-                this.buffer = Buffer.from(this.buffer.subarray(4));
+                offset += 4;
                 this.emit("keepalive");
                 continue;
             }
@@ -249,11 +254,12 @@ export class PeerConnection extends EventEmitter {
                 this.onError(new Error(`Peer sent oversized message (${msgLen} bytes)`));
                 return;
             }
-            if (this.buffer.length < 4 + msgLen) return;
-            const msg = this.buffer.subarray(4, 4 + msgLen);
-            this.buffer = Buffer.from(this.buffer.subarray(4 + msgLen));
+            if (this.buffer.length - offset < 4 + msgLen) break;
+            const msg = this.buffer.subarray(offset + 4, offset + 4 + msgLen);
+            offset += 4 + msgLen;
             this.dispatchMessage(msg);
         }
+        if (offset > 0) this.buffer = Buffer.from(this.buffer.subarray(offset));
     }
 
     private dispatchMessage(msg: Buffer): void {

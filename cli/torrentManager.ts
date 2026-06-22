@@ -663,6 +663,7 @@ export class TorrentManager extends EventEmitter {
         this.emit("update");
 
         const readaheadPieces = Math.max(1, Math.ceil(STREAM_READAHEAD_BYTES / pieceLen));
+        let lastStreamEmit = 0;
         try {
             const t = await this.ensureStartedTorrent(m);
             this.applyLimiter(m);
@@ -678,9 +679,14 @@ export class TorrentManager extends EventEmitter {
                     const windowEnd = Math.min(lastPiece, p + readaheadPieces);
                     for (let w = p; w <= windowEnd; w++) t.pieceManager.prioritizePiece(w);
                 }
-                this.runScheduler(Date.now());
-                t.kickRequests();
-                if (!t.pieceManager.haveBitfield.get(p)) await this.waitForPiece(t, p);
+                // Only kick the (heavy, all-torrents) scheduler when we actually
+                // need to fetch this piece. Streaming an already-complete file
+                // otherwise ran a full 3-pass scheduler scan per piece for nothing.
+                if (!t.pieceManager.haveBitfield.get(p)) {
+                    this.runScheduler(Date.now());
+                    t.kickRequests();
+                    await this.waitForPiece(t, p);
+                }
                 if (isAborted()) return;
                 const pieceStart = p * pieceLen;
                 const readBegin = Math.max(absStart, pieceStart) - pieceStart;
@@ -689,7 +695,13 @@ export class TorrentManager extends EventEmitter {
                 const chunk = await t.storage.readBlock(p, readBegin, readEnd - readBegin);
                 await write(chunk);
                 stats.chunksReturned++;
-                this.emit("update");
+                // Coalesce UI updates: a full TUI rebuild per streamed chunk was
+                // firing many times a second during playback.
+                const now = Date.now();
+                if (now - lastStreamEmit >= 250) {
+                    lastStreamEmit = now;
+                    this.emit("update");
+                }
             }
         } finally {
             if (prioritize) {
