@@ -2,6 +2,7 @@ import https from "https";
 import { IncomingMessage, ServerResponse } from "http";
 import { stringify as stringifyYaml } from "yaml";
 import { TorrentManager, TorrentView } from "../torrentManager";
+import { SchedulerSettings } from "../config";
 import { getOrCreatePassword, passwordMatches } from "./webAuth";
 import { getOrCreateCert } from "./webCert";
 
@@ -31,13 +32,17 @@ export class WebCommandServer {
     private readonly manager: TorrentManager;
     private readonly port: number;
     private readonly host: string;
+    // Applies edited scheduler settings live AND persists them to the config file
+    // (owned by the caller, which holds the Config object).
+    private readonly onSchedulerChange: (changes: Partial<SchedulerSettings>) => void;
     private server?: https.Server;
     password = "";
 
-    constructor(config: { manager: TorrentManager; port: number; host?: string }) {
+    constructor(config: { manager: TorrentManager; port: number; host?: string; onSchedulerChange: (changes: Partial<SchedulerSettings>) => void }) {
         this.manager = config.manager;
         this.port = config.port;
         this.host = config.host ?? "0.0.0.0";
+        this.onSchedulerChange = config.onSchedulerChange;
     }
 
     async start(): Promise<void> {
@@ -81,6 +86,14 @@ export class WebCommandServer {
             this.serveTorrents(res);
             return;
         }
+        if (parts.length === 1 && parts[0] === "options") {
+            if (req.method === "POST") {
+                await this.applyOptions(req, res);
+                return;
+            }
+            this.serveOptions(res, url.searchParams.has("saved"));
+            return;
+        }
         if (parts.length === 1 && parts[0] === "status") {
             this.serveStatus(res);
             return;
@@ -96,6 +109,42 @@ export class WebCommandServer {
 
         res.writeHead(404, { "content-type": "text/plain" });
         res.end("Not found\n");
+    }
+
+    // Settings page: every scheduler knob as an editable number field. Generic
+    // over the settings object so new options (e.g. verifyScanMbps) show up
+    // automatically without touching this code.
+    private serveOptions(res: ServerResponse, saved: boolean): void {
+        const pw = encodeURIComponent(this.password);
+        const settings = this.manager.schedulerSettings;
+        const fields = Object.entries(settings)
+            .map(([key, value]) =>
+                `<label style="display:block;margin:8px 0">` +
+                `<span style="display:inline-block;width:220px">${escapeHtml(humanizeKey(key))}</span>` +
+                `<input type="number" name="${escapeHtml(key)}" value="${escapeHtml(String(value))}" step="any" style="width:160px">` +
+                `</label>`
+            )
+            .join("\n");
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(optionsHtml(pw, fields, saved));
+    }
+
+    private async applyOptions(req: IncomingMessage, res: ServerResponse): Promise<void> {
+        const body = await readBody(req);
+        const submitted = new URLSearchParams(body);
+        const settings = this.manager.schedulerSettings;
+        const changes: Partial<SchedulerSettings> = {};
+        for (const key of Object.keys(settings) as (keyof SchedulerSettings)[]) {
+            const raw = submitted.get(key);
+            if (raw === null || raw === "") continue;
+            const num = Number(raw);
+            if (!Number.isFinite(num)) continue;
+            changes[key] = num;
+        }
+        this.onSchedulerChange(changes);
+        const pw = encodeURIComponent(this.password);
+        res.writeHead(303, { location: `/options?password=${pw}&saved=1` });
+        res.end();
     }
 
     private serveStatus(res: ServerResponse): void {
@@ -118,7 +167,7 @@ export class WebCommandServer {
         }
         const list = items.length > 0 && items.join("\n") || "<li>(no torrents)</li>";
         res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-        res.end(torrentsHtml(list));
+        res.end(torrentsHtml(list, `/options?password=${pw}`));
     }
 
     // Per-torrent page: each file is a download link plus a "video" button.
@@ -302,11 +351,12 @@ function escapeHtml(s: string): string {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-function torrentsHtml(list: string): string {
+function torrentsHtml(list: string, optionsLink: string): string {
     return `<!doctype html>
 <html>
 <head><meta charset="utf-8"><title>torrents</title></head>
 <body>
+<p><a href="${escapeHtml(optionsLink)}">⚙ options</a></p>
 <h2 style="font-size:20px">Torrents</h2>
 <ul id="list">
 ${list}
@@ -314,6 +364,44 @@ ${list}
 </body>
 </html>
 `;
+}
+
+function optionsHtml(password: string, fields: string, saved: boolean): string {
+    const banner = saved && `<p style="color:green">Saved to config file.</p>` || "";
+    return `<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>options</title></head>
+<body>
+<p><a href="/?password=${password}">← all torrents</a></p>
+<h2 style="font-size:20px">Options</h2>
+${banner}
+<form method="POST" action="/options?password=${password}">
+${fields}
+<p><button type="submit">Save</button></p>
+</form>
+<p style="color:#888">Changes apply live and are written to the config file. Path/port changes still require an app restart.</p>
+</body>
+</html>
+`;
+}
+
+function humanizeKey(key: string): string {
+    return key.replace(/([A-Z])/g, " $1").replace(/^./, (c) => c.toUpperCase()).trim();
+}
+
+function readBody(req: IncomingMessage): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        req.on("data", (chunk: Buffer) => {
+            size += chunk.length;
+            // A settings form is tiny; reject anything implausibly large.
+            if (size > 1 << 20) { reject(new Error(`Request body too large (${size} bytes)`)); return; }
+            chunks.push(chunk);
+        });
+        req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+        req.on("error", reject);
+    });
 }
 
 function filesHtml(title: string, back: string, list: string): string {
