@@ -5,6 +5,7 @@ import path from "path";
 import { TorrentMeta, TorrentFile, pieceLengthAt } from "./torrentFile";
 import { Bitfield } from "./bitfield";
 import { tryStat, pathExists } from "./fsUtils";
+import { sharedHashPool } from "./hashPool";
 
 interface FilePlan {
     file: TorrentFile;
@@ -320,6 +321,7 @@ export class Storage {
                 return undefined;
             }
         };
+        const pool = sharedHashPool();
         let piecesRead = 0;
         config?.onProgress?.({ piecesRead, piecesToRead: toRead.length });
         try {
@@ -337,17 +339,19 @@ export class Storage {
                 }
                 const run = runs[r];
                 const base = run[0] * this.meta.pieceLength;
-                for (const i of run) {
+                // Hash every piece in the run across the worker pool so all cores
+                // share the load; on a fast disk SHA-1 is the bottleneck, not I/O.
+                await Promise.all(run.map(async (i) => {
                     const off = i * this.meta.pieceLength - base;
                     const slice = buf.subarray(off, off + pieceLengthAt(this.meta, i));
-                    const computed = crypto.createHash("sha1").update(slice).digest();
+                    const computed = await pool.hash(slice);
                     if (!computed.equals(this.meta.pieceHashes[i])) {
                         config?.onMismatch?.({ index: i, computed, expected: this.meta.pieceHashes[i] });
-                        continue;
+                        return;
                     }
                     result.set(i);
                     if (keepData) valid.push({ index: i, data: Buffer.from(slice) });
-                }
+                }));
                 piecesRead += run.length;
                 config?.onProgress?.({ piecesRead, piecesToRead: toRead.length });
             }
