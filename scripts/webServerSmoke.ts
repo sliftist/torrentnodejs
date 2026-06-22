@@ -74,7 +74,7 @@ async function main() {
     await manager.addSourceFile(torrentPath);
     const infoHash = manager.views()[0].infoHash;
 
-    const server = new WebCommandServer({ manager, port: 0, host: "127.0.0.1", onSchedulerChange: (changes) => manager.updateScheduler(changes) });
+    const server = new WebCommandServer({ manager, port: 0, host: "127.0.0.1" });
     await server.start();
     const addr = (server as unknown as { server: { address(): { port: number } } }).server.address();
     const port = addr.port;

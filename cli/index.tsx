@@ -98,21 +98,11 @@ async function main() {
     watcher.start();
     copyWatcher.start();
 
-    const onSchedulerChange = (changes: Partial<typeof config.scheduler>) => {
-        manager.updateScheduler(changes);
-        if (changes.watchIntervalMs) {
-            watcher.setIntervalMs(changes.watchIntervalMs);
-            copyWatcher.setIntervalMs(changes.watchIntervalMs);
-        }
-        config.scheduler = { ...config.scheduler, ...changes };
-        void saveConfig(config);
-    };
-
     // Public-interface HTTPS status/file server. This is the one component
     // allowed to listen and talk OUTSIDE the WireGuard tunnel; the word-password
     // (cached in ~/.bittorrent, passed in the ?password= query string) gates
     // every request.
-    const webServer = new WebCommandServer({ manager, port: config.webPort, onSchedulerChange });
+    const webServer = new WebCommandServer({ manager, port: config.webPort });
     let webUrl: string | undefined;
     let webPassword: string | undefined;
     try {
@@ -138,6 +128,13 @@ async function main() {
             void saveConfig(config);
         }
         watcher.addFolder(resolved);
+    };
+
+    const onSchedulerChange = (changes: Partial<typeof config.scheduler>) => {
+        manager.updateScheduler(changes);
+        if (changes.watchIntervalMs) watcher.setIntervalMs(changes.watchIntervalMs);
+        config.scheduler = { ...config.scheduler, ...changes };
+        void saveConfig(config);
     };
 
     const app = render(
