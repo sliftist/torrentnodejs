@@ -253,16 +253,21 @@ export class Torrent extends EventEmitter {
     async start(): Promise<void> {
         if (this.startedAt) throw new Error("Torrent already started");
         this.startedAt = Date.now();
-        await this.storage.open();
 
         const mode = this.options.mode ?? "full";
+
+        // Stamp the verify start before open() so the timer covers the whole
+        // disk-bound phase, including learning what's on disk.
+        if (this.options.verifyExisting && !this.options.seedExisting) {
+            this.verifyStartedAtField = Date.now();
+        }
+        await this.storage.open();
 
         if (this.options.seedExisting) {
             this.pieceManager.markAllSelectedDone();
         } else if (this.options.verifyExisting) {
             // Only a real download (full mode) seeds the temp file from salvaged
             // output; a scan just reports what's actually on disk.
-            this.verifyStartedAtField = Date.now();
             this.verifyProgressField = { piecesRead: 0, piecesToRead: 0 };
             const have = await this.storage.verifyExistingPieces(this.pieceManager.selected, {
                 importToTemp: mode === "full",

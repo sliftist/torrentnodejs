@@ -125,12 +125,17 @@ export async function runStorageTests() {
     try {
         const sNone = new Storage(meta, missingDir);
         await sNone.open();
-        // open() pre-allocates the (sparse, all-zero) temp file. Verify must not
-        // read a single byte of it — a freshly-allocated temp isn't real data.
+        // open() allocates nothing: with no data on disk, not even the temp dir
+        // is created. (A multi-TB torrent used to pre-allocate terabytes of
+        // sparse temp files here before verification could even begin.)
+        const tempCreated = await stat(path.join(missingDir, ".bittorrent-incomplete")).catch(() => undefined);
+        assert.ok(!tempCreated, "open() must not create temp files when there's no data");
+        // No data on disk and no temp file created, so verify must not read or
+        // hash a single byte — it returns instantly.
         const readsBefore = diskIO.bytesRead;
         const none = await sNone.verifyExistingPieces();
         assert.strictEqual(none.popcount(), 0, "no on-disk file → no pieces verify");
-        assert.strictEqual(diskIO.bytesRead, readsBefore, "verify reads nothing when only a freshly-allocated temp exists");
+        assert.strictEqual(diskIO.bytesRead, readsBefore, "verify reads nothing when no data is on disk");
         await sNone.close();
 
         // Only the first piece's worth of bytes exists; the rest is absent.

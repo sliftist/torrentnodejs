@@ -15,16 +15,18 @@ interface FilePlan {
     // True once every piece of this file is present and it has been renamed
     // from the temp dir into its final location.
     finalized: boolean;
-    // Raw stat of the file physically on disk at finalPath, if any. Set even when
-    // the size doesn't match the torrent's expected length — that's how we read
-    // and salvage a partial or mismatched output file rather than reporting 0%.
-    existingFinalSize?: number;
-    existingFinalMtimeMs?: number;
-    // Raw stat of the in-progress temp copy when it (and not a final output file)
-    // backs this plan's bytes. Only recorded when there's no final file, since
-    // existingSource() always prefers the final file when one is present.
-    existingTempSize?: number;
-    existingTempMtimeMs?: number;
+    // Stat of the final output file on disk, if any. Set even when its size
+    // doesn't match the torrent's expected length — that's how we read and
+    // salvage a partial or mismatched output file rather than reporting 0%.
+    finalSize?: number;
+    finalMtimeMs?: number;
+    // Stat of the in-progress temp copy, set only once that file physically
+    // exists on disk: a partial picked up at open() (a resumed download) or one
+    // we allocated on the first write to it. Undefined means no temp file
+    // exists, so a torrent we only scan (or haven't begun downloading) reserves
+    // no space and has nothing temp-backed to read.
+    tempSize?: number;
+    tempMtimeMs?: number;
 }
 
 // On-disk record of a previous verification, stored alongside the output files.
@@ -110,6 +112,11 @@ export class Storage {
         private readonly touchedPieces?: Set<number>,
     ) {}
 
+    // Learn what's already on disk; allocate nothing. Only stats are done here —
+    // a couple per file — so opening a multi-terabyte torrent is instant whether
+    // or not its data exists. Temp files are created lazily on the first write
+    // (see writeAt), so a scan, or a torrent we haven't begun downloading, never
+    // reserves a byte of space.
     async open(): Promise<void> {
         if (this.opened) return;
         this.opened = true;
@@ -121,33 +128,23 @@ export class Storage {
             const allocated = touchedFiles.has(f);
             const plan: FilePlan = { file: f, finalPath, tempPath, allocated, finalized: false };
             this.filePlans.push(plan);
-            // Record any existing output file's stat for verify/import/cache, even
-            // for files we won't actively write (so a scan can read them too).
-            // existingSource() turns these raw stats into the single decision of
-            // which file backs this plan's bytes.
             const finalStat = await stat(finalPath).catch(() => undefined);
             if (finalStat) {
-                plan.existingFinalSize = finalStat.size;
-                plan.existingFinalMtimeMs = finalStat.mtimeMs;
+                plan.finalSize = finalStat.size;
+                plan.finalMtimeMs = finalStat.mtimeMs;
             }
             if (!allocated) continue;
-            // Already complete from a previous run? Read it straight from its
-            // final spot; no temp file needed.
+            // A right-sized final file is already complete: read it in place.
             if (finalStat && finalStat.size === f.length) {
                 plan.finalized = true;
                 continue;
             }
-            // Stat the temp file BEFORE allocating: only a temp file that
-            // already existed (a partial download from a previous run) can hold
-            // real data worth verifying. The file we're about to allocate is
-            // freshly pre-allocated all-zeros, so it must not be treated as a
-            // backing source — otherwise a scan would hash terabytes of zeros
-            // for torrents whose data isn't on disk yet.
+            // Pick up a partial temp file left by a previous run so a resumed
+            // download verifies its existing progress.
             const tempStat = await stat(tempPath).catch(() => undefined);
-            await this.allocate(tempPath, f.length);
-            if (!finalStat && tempStat) {
-                plan.existingTempSize = tempStat.size;
-                plan.existingTempMtimeMs = tempStat.mtimeMs;
+            if (tempStat) {
+                plan.tempSize = tempStat.size;
+                plan.tempMtimeMs = tempStat.mtimeMs;
             }
         }
     }
@@ -319,8 +316,9 @@ export class Storage {
             for (const plan of this.filePlans) {
                 if (!plan.finalized || this.fileComplete(plan.file, result)) continue;
                 plan.finalized = false;
-                if (plan.existingFinalSize === undefined) plan.existingFinalSize = plan.file.length;
+                if (plan.finalSize === undefined) plan.finalSize = plan.file.length;
                 await this.allocate(plan.tempPath, plan.file.length);
+                plan.tempSize = plan.file.length;
             }
             // Pieces trusted from the cache weren't read above; any that are good
             // and now belong to a demoted (temp-backed) file still need their
@@ -390,7 +388,7 @@ export class Storage {
     // file's size: a right-sized file full of garbage (0% verifying) is still
     // mismatched output, even though open() optimistically marked it finalized.
     hasMismatchedOutput(have: Bitfield): boolean {
-        return this.filePlans.some((p) => p.existingFinalSize !== undefined && p.file.length > 0 && !this.fileComplete(p.file, have));
+        return this.filePlans.some((p) => p.finalSize !== undefined && p.file.length > 0 && !this.fileComplete(p.file, have));
     }
 
     // Whether verification is reading the user's finished output files
@@ -501,19 +499,20 @@ export class Storage {
             // File not allocated (outside selection). Skip silently.
             if (!plan.allocated) continue;
             if (mode === "tempOnly" && plan.finalized) continue;
+            // First write to this temp file: allocate it now, reserving its full
+            // (sparse) size. This is the only place temp files are created, so a
+            // file we never download never reserves space — and once it exists it
+            // becomes the backing source for later reads/verify.
+            if (!plan.finalized && plan.tempSize === undefined) {
+                await this.allocate(plan.tempPath, plan.file.length);
+                plan.tempSize = plan.file.length;
+            }
             const handle = await open(this.activePath(plan), fsConstants.O_RDWR | fsConstants.O_CREAT, 0o644);
             try {
                 await writeFully(handle, data, dataOffset, sliceLength, fileOffset);
                 diskIO.bytesWritten += sliceLength;
             } finally {
                 await handle.close();
-            }
-            // Writing real bytes into the temp copy makes it a backing source for
-            // later existing-reads/verify. A temp file we merely pre-allocated
-            // (all zeros) is deliberately left out of existingSource so a scan
-            // doesn't hash gigabytes of zeros for data that isn't on disk yet.
-            if (!plan.finalized && plan.existingTempSize === undefined) {
-                plan.existingTempSize = plan.file.length;
             }
         }
     }
@@ -583,11 +582,11 @@ export class Storage {
     // touches existing on-disk data — reads, the verified-piece cache, and the
     // verify-target label — goes through here, so they can never disagree.
     private existingSource(plan: FilePlan): { path: string; limit: number; size: number; mtimeMs?: number } | undefined {
-        if (plan.existingFinalSize !== undefined) {
-            return { path: plan.finalPath, limit: plan.existingFinalSize, size: plan.existingFinalSize, mtimeMs: plan.existingFinalMtimeMs };
+        if (plan.finalSize !== undefined) {
+            return { path: plan.finalPath, limit: plan.finalSize, size: plan.finalSize, mtimeMs: plan.finalMtimeMs };
         }
-        if (plan.allocated && plan.existingTempSize !== undefined) {
-            return { path: plan.tempPath, limit: plan.file.length, size: plan.existingTempSize, mtimeMs: plan.existingTempMtimeMs };
+        if (plan.allocated && plan.tempSize !== undefined) {
+            return { path: plan.tempPath, limit: plan.file.length, size: plan.tempSize, mtimeMs: plan.tempMtimeMs };
         }
         return undefined;
     }
