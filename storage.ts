@@ -126,27 +126,37 @@ export class Storage {
             const finalPath = path.join(this.saveDir, ...f.path);
             const tempPath = this.joinSameFlavor(tempBase, f.path);
             const allocated = touchedFiles.has(f);
-            const plan: FilePlan = { file: f, finalPath, tempPath, allocated, finalized: false };
-            this.filePlans.push(plan);
-            const finalStat = await stat(finalPath).catch(() => undefined);
+            this.filePlans.push({ file: f, finalPath, tempPath, allocated, finalized: false });
+        }
+        // Stat every file's on-disk state up front so verify knows what is
+        // present. Done with bounded concurrency: a torrent with many files on a
+        // slow disk would otherwise spend many seconds in serial stat() calls
+        // before verification could even begin.
+        const statPlan = async (plan: FilePlan) => {
+            const finalStat = await stat(plan.finalPath).catch(() => undefined);
             if (finalStat) {
                 plan.finalSize = finalStat.size;
                 plan.finalMtimeMs = finalStat.mtimeMs;
             }
-            if (!allocated) continue;
+            if (!plan.allocated) return;
             // A right-sized final file is already complete: read it in place.
-            if (finalStat && finalStat.size === f.length) {
+            if (finalStat && finalStat.size === plan.file.length) {
                 plan.finalized = true;
-                continue;
+                return;
             }
             // Pick up a partial temp file left by a previous run so a resumed
             // download verifies its existing progress.
-            const tempStat = await stat(tempPath).catch(() => undefined);
+            const tempStat = await stat(plan.tempPath).catch(() => undefined);
             if (tempStat) {
                 plan.tempSize = tempStat.size;
                 plan.tempMtimeMs = tempStat.mtimeMs;
             }
-        }
+        };
+        let next = 0;
+        const worker = async () => {
+            while (next < this.filePlans.length) await statPlan(this.filePlans[next++]);
+        };
+        await Promise.all(Array.from({ length: Math.min(128, this.filePlans.length) }, worker));
     }
 
     async close(): Promise<void> {
