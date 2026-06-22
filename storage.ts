@@ -41,12 +41,13 @@ interface CheckedCache {
 const CHECKED_CACHE_DIR = ".bittorrent-checked";
 const CHECKED_CACHE_VERSION = 1;
 
-// How many pieces to read+hash at once during verification. The old serial
-// loop read one piece, hashed it, then read the next — leaving the disk idle
-// while the CPU hashed and vice versa, so throughput sat far below the drive's
-// real speed. Reading several pieces concurrently keeps the disk queue full and
-// overlaps I/O with hashing.
-const VERIFY_CONCURRENCY = 8;
+// Target size of a single sequential read during verification. The old loop
+// read one piece per syscall (often just 256KB–1MB); on a spinning disk that
+// means a seek/stall between every read. Coalescing adjacent pieces into reads
+// this large lets the platter stream at full speed, which dominates HDD verify
+// throughput. Two of these may be in memory at once (one hashing, one
+// prefetching), so keep it modest.
+const READ_RUN_BYTES = 16 * 1024 * 1024;
 
 // Process-wide disk I/O byte counters, sampled by the UI to show an actual
 // file-I/O throughput. Incremented by every real read/write of file data
@@ -78,21 +79,6 @@ async function readFully(handle: FileHandle, buffer: Buffer, offset: number, len
         total += bytesRead;
     }
     return total;
-}
-
-// Run `fn` over `items` with at most `limit` in flight at once. Workers pull
-// the next index off a shared cursor, so a slow item never holds up the others.
-async function mapConcurrent<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
-    let next = 0;
-    const worker = async () => {
-        while (next < items.length) {
-            const i = next++;
-            await fn(items[i]);
-        }
-    };
-    const workers: Promise<void>[] = [];
-    for (let w = 0; w < Math.min(limit, items.length); w++) workers.push(worker());
-    await Promise.all(workers);
 }
 
 async function writeFully(handle: FileHandle, buffer: Buffer, offset: number, length: number, position: number): Promise<void> {
@@ -241,36 +227,67 @@ export class Storage {
         // memory, so we drop the data and just record the bitfield.
         const keepData = Boolean(config?.importToTemp);
         const valid: { index: number; data: Buffer }[] = [];
+
+        // Decide which pieces actually need reading. Cache-trusted pieces are
+        // recorded with no I/O; pieces with no file behind them are simply
+        // missing (hashing a zero buffer could never match), so they're skipped
+        // — that's what makes a torrent whose data isn't on disk verify instantly
+        // instead of hashing terabytes of zeros.
+        const toRead: number[] = [];
+        for (const i of toCheck) {
+            if (i < 0 || i >= this.meta.pieceHashes.length) continue;
+            if (cachedHave && cached && this.pieceUnchanged(i, cached)) {
+                if (cachedHave.get(i)) result.set(i);
+                continue;
+            }
+            if (!this.pieceBacked(i)) continue;
+            toRead.push(i);
+        }
+        toRead.sort((a, b) => a - b);
+
+        // Group consecutive pieces into big sequential runs. Reading one piece
+        // per syscall on a spinning disk means a seek (or at least a stall)
+        // between every small read; coalescing adjacent pieces into a single
+        // multi-megabyte read lets the platter stream at full speed.
+        const piecesPerRun = Math.max(1, Math.floor(READ_RUN_BYTES / this.meta.pieceLength));
+        const runs: number[][] = [];
+        for (const i of toRead) {
+            const last = runs[runs.length - 1];
+            if (last && i === last[last.length - 1] + 1 && last.length < piecesPerRun) last.push(i);
+            else runs.push([i]);
+        }
+
         // Reused across the whole pass so a multi-TB file is opened once, not once
         // per piece. Closed in the finally below.
         const handles = new Map<string, Promise<FileHandle | undefined>>();
+        const readRun = (run: number[]) => {
+            const startOffset = run[0] * this.meta.pieceLength;
+            const lastEnd = run[run.length - 1] * this.meta.pieceLength + pieceLengthAt(this.meta, run[run.length - 1]);
+            return this.readAt(startOffset, lastEnd - startOffset, "existing", handles).catch(() => undefined);
+        };
         try {
-            await mapConcurrent(toCheck, VERIFY_CONCURRENCY, async (i) => {
-                if (i < 0 || i >= this.meta.pieceHashes.length) return;
-                if (cachedHave && cached && this.pieceUnchanged(i, cached)) {
-                    if (cachedHave.get(i)) result.set(i);
-                    return; // trust the cached result; no read, no hash
+            // One run read-ahead: while the CPU hashes run r, the disk streams the
+            // next (sequentially adjacent) run, so I/O and hashing overlap without
+            // forcing the head to jump around.
+            let prefetch = runs.length ? readRun(runs[0]) : undefined;
+            for (let r = 0; r < runs.length; r++) {
+                const buf = await prefetch;
+                prefetch = r + 1 < runs.length ? readRun(runs[r + 1]) : undefined;
+                if (!buf) continue;
+                const run = runs[r];
+                const base = run[0] * this.meta.pieceLength;
+                for (const i of run) {
+                    const off = i * this.meta.pieceLength - base;
+                    const slice = buf.subarray(off, off + pieceLengthAt(this.meta, i));
+                    const computed = crypto.createHash("sha1").update(slice).digest();
+                    if (!computed.equals(this.meta.pieceHashes[i])) {
+                        config?.onMismatch?.({ index: i, computed, expected: this.meta.pieceHashes[i] });
+                        continue;
+                    }
+                    result.set(i);
+                    if (keepData) valid.push({ index: i, data: Buffer.from(slice) });
                 }
-                // No file on disk backs (all of) this piece — it's simply missing.
-                // Hashing the zero-filled buffer could never match, so skip it
-                // entirely. This makes a torrent whose data isn't on disk verify
-                // instantly instead of hashing terabytes of zeros.
-                if (!this.pieceBacked(i)) return;
-                let data: Buffer;
-                try {
-                    data = await this.readAt(i * this.meta.pieceLength, pieceLengthAt(this.meta, i), "existing", handles);
-                } catch {
-                    return; // unreadable → treat as missing
-                }
-                const computed = crypto.createHash("sha1").update(data).digest();
-                const expected = this.meta.pieceHashes[i];
-                if (!computed.equals(expected)) {
-                    config?.onMismatch?.({ index: i, computed, expected });
-                    return;
-                }
-                result.set(i);
-                if (keepData) valid.push({ index: i, data });
-            });
+            }
         } finally {
             for (const pending of handles.values()) {
                 const h = await pending;
