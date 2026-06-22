@@ -344,7 +344,7 @@ export function App(props: AppProps) {
                 {body}
             </Box>
             {overlay === "actions" && <ActionsMenu actions={actions} index={actionIndex} />}
-            {overlay === "limits" && <LimitsEditor draft={limitsDraft} index={limitIndex} />}
+            {overlay === "limits" && <LimitsEditor draft={limitsDraft} index={limitIndex} maxVisible={Math.max(3, dims.rows - 21)} />}
             {overlay === "confirmDelete" && pendingDelete && <ConfirmDelete name={pendingDelete.name} width={width} />}
             <Footer
                 width={width}
@@ -392,12 +392,20 @@ function ConfirmDelete(props: { name: string; width: number }) {
     );
 }
 
-function LimitsEditor(props: { draft: Record<string, string>; index: number }) {
-    const { draft, index } = props;
+function LimitsEditor(props: { draft: Record<string, string>; index: number; maxVisible: number }) {
+    const { draft, index, maxVisible } = props;
+    const total = LIMIT_FIELDS.length;
+    const visible = Math.min(maxVisible, total);
+    const start = Math.max(0, Math.min(index - Math.floor(visible / 2), total - visible));
+    const shown = LIMIT_FIELDS.slice(start, start + visible);
+    const moreAbove = start > 0;
+    const moreBelow = start + visible < total;
     return (
         <Box flexDirection="column" width={MENU_WIDTH} borderStyle="round" borderColor="cyan" paddingX={1}>
             <Text bold color="cyan">Options</Text>
-            {LIMIT_FIELDS.map((f, i) => {
+            <Text dimColor>{moreAbove && "  ↑ more" || " "}</Text>
+            {shown.map((f, j) => {
+                const i = start + j;
                 const active = i === index;
                 return (
                     <Box key={f.key} justifyContent="space-between">
@@ -408,6 +416,7 @@ function LimitsEditor(props: { draft: Record<string, string>; index: number }) {
                     </Box>
                 );
             })}
+            <Text dimColor>{moreBelow && "  ↓ more" || " "}</Text>
             <Text dimColor>↑↓ field · 0-9 edit · Enter save · Esc cancel</Text>
         </Box>
     );
