@@ -117,6 +117,30 @@ export async function runStorageTests() {
         await rm(salvageDir, { recursive: true, force: true });
     }
 
+    // Missing data: when no file backs a torrent on disk, every piece is simply
+    // absent, so verify must report zero without reading or hashing anything
+    // (the slow path used to hash a zero-filled buffer per piece). A truncated
+    // file likewise can't back the pieces past its end.
+    const missingDir = await mkdtemp(path.join(os.tmpdir(), "bt-storage-missing-"));
+    try {
+        const sNone = new Storage(meta, missingDir);
+        await sNone.open();
+        const none = await sNone.verifyExistingPieces();
+        assert.strictEqual(none.popcount(), 0, "no on-disk file → no pieces verify");
+        await sNone.close();
+
+        // Only the first piece's worth of bytes exists; the rest is absent.
+        await writeFile(path.join(missingDir, "blob.bin"), data.subarray(0, pieceLength));
+        const sPart = new Storage(meta, missingDir);
+        await sPart.open();
+        const part = await sPart.verifyExistingPieces();
+        assert.strictEqual(part.popcount(), 1, "only the backed piece verifies");
+        assert.ok(part.get(0), "the present piece verifies");
+        await sPart.close();
+    } finally {
+        await rm(missingDir, { recursive: true, force: true });
+    }
+
     // Checked cache: once an unchanged output file has been verified, a repeat
     // verify trusts the cache (size+mtime) instead of re-hashing. We prove this
     // by corrupting the file's bytes while preserving its size and mtime — the

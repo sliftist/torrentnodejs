@@ -74,7 +74,7 @@ async function main() {
         const storage = new Storage(meta, config.downloadDir, new Set());
         await storage.open();
         let mismatched = 0;
-        await storage.verifyExistingPieces(
+        const have = await storage.verifyExistingPieces(
             meta.pieceHashes.map((_, i) => i),
             {
                 onMismatch: ({ index, computed, expected }) => {
@@ -91,8 +91,11 @@ async function main() {
         );
         await storage.close();
         totalMismatched += mismatched;
-        const ok = total - mismatched;
-        console.log(`  ${ok}/${total} chunks verified, ${mismatched} mismatched\n`);
+        const ok = have.popcount();
+        // Pieces that are neither verified nor a content mismatch have no file
+        // on disk backing them — they're simply absent.
+        const missing = total - ok - mismatched;
+        console.log(`  ${ok}/${total} chunks verified, ${mismatched} mismatched, ${missing} missing\n`);
     }
     console.log(`Done. ${totalMismatched} mismatched chunk(s) across ${matched.length} torrent(s).`);
 }

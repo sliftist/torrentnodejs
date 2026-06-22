@@ -41,6 +41,13 @@ interface CheckedCache {
 const CHECKED_CACHE_DIR = ".bittorrent-checked";
 const CHECKED_CACHE_VERSION = 1;
 
+// How many pieces to read+hash at once during verification. The old serial
+// loop read one piece, hashed it, then read the next — leaving the disk idle
+// while the CPU hashed and vice versa, so throughput sat far below the drive's
+// real speed. Reading several pieces concurrently keeps the disk queue full and
+// overlaps I/O with hashing.
+const VERIFY_CONCURRENCY = 8;
+
 // Process-wide disk I/O byte counters, sampled by the UI to show an actual
 // file-I/O throughput. Incremented by every real read/write of file data
 // (verification reads, block writes, upload reads) — not by allocation.
@@ -71,6 +78,21 @@ async function readFully(handle: FileHandle, buffer: Buffer, offset: number, len
         total += bytesRead;
     }
     return total;
+}
+
+// Run `fn` over `items` with at most `limit` in flight at once. Workers pull
+// the next index off a shared cursor, so a slow item never holds up the others.
+async function mapConcurrent<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+    let next = 0;
+    const worker = async () => {
+        while (next < items.length) {
+            const i = next++;
+            await fn(items[i]);
+        }
+    };
+    const workers: Promise<void>[] = [];
+    for (let w = 0; w < Math.min(limit, items.length); w++) workers.push(worker());
+    await Promise.all(workers);
 }
 
 async function writeFully(handle: FileHandle, buffer: Buffer, offset: number, length: number, position: number): Promise<void> {
@@ -214,27 +236,46 @@ export class Storage {
         const cachedHave = cached && cached.pieceCount === this.meta.pieceHashes.length
             && new Bitfield(this.meta.pieceHashes.length, Buffer.from(cached.have, "base64"));
 
+        // Only the importToTemp path needs the verified bytes kept around; for a
+        // plain scan, retaining every valid piece would hold the whole torrent in
+        // memory, so we drop the data and just record the bitfield.
+        const keepData = Boolean(config?.importToTemp);
         const valid: { index: number; data: Buffer }[] = [];
-        for (const i of toCheck) {
-            if (i < 0 || i >= this.meta.pieceHashes.length) continue;
-            if (cachedHave && cached && this.pieceUnchanged(i, cached)) {
-                if (cachedHave.get(i)) result.set(i);
-                continue; // trust the cached result; no read, no hash
+        // Reused across the whole pass so a multi-TB file is opened once, not once
+        // per piece. Closed in the finally below.
+        const handles = new Map<string, Promise<FileHandle | undefined>>();
+        try {
+            await mapConcurrent(toCheck, VERIFY_CONCURRENCY, async (i) => {
+                if (i < 0 || i >= this.meta.pieceHashes.length) return;
+                if (cachedHave && cached && this.pieceUnchanged(i, cached)) {
+                    if (cachedHave.get(i)) result.set(i);
+                    return; // trust the cached result; no read, no hash
+                }
+                // No file on disk backs (all of) this piece — it's simply missing.
+                // Hashing the zero-filled buffer could never match, so skip it
+                // entirely. This makes a torrent whose data isn't on disk verify
+                // instantly instead of hashing terabytes of zeros.
+                if (!this.pieceBacked(i)) return;
+                let data: Buffer;
+                try {
+                    data = await this.readAt(i * this.meta.pieceLength, pieceLengthAt(this.meta, i), "existing", handles);
+                } catch {
+                    return; // unreadable → treat as missing
+                }
+                const computed = crypto.createHash("sha1").update(data).digest();
+                const expected = this.meta.pieceHashes[i];
+                if (!computed.equals(expected)) {
+                    config?.onMismatch?.({ index: i, computed, expected });
+                    return;
+                }
+                result.set(i);
+                if (keepData) valid.push({ index: i, data });
+            });
+        } finally {
+            for (const pending of handles.values()) {
+                const h = await pending;
+                if (h) await h.close().catch(() => {});
             }
-            let data: Buffer;
-            try {
-                data = await this.readAt(i * this.meta.pieceLength, pieceLengthAt(this.meta, i), "existing");
-            } catch {
-                continue; // unreadable → treat as missing
-            }
-            const computed = crypto.createHash("sha1").update(data).digest();
-            const expected = this.meta.pieceHashes[i];
-            if (!computed.equals(expected)) {
-                config?.onMismatch?.({ index: i, computed, expected });
-                continue;
-            }
-            result.set(i);
-            valid.push({ index: i, data });
         }
 
         if (config?.importToTemp) {
@@ -277,6 +318,23 @@ export class Storage {
             if (start < fEnd && end > plan.file.offsetInTorrent) out.push(plan);
         }
         return out;
+    }
+
+    // True only if every byte of this piece is backed by a file that physically
+    // exists on disk and is long enough to cover it. When any overlapping file is
+    // absent (or too short), the piece can't possibly hash correctly, so there's
+    // no point reading or hashing it — it's missing, not corrupt.
+    private pieceBacked(index: number): boolean {
+        const end = index * this.meta.pieceLength + pieceLengthAt(this.meta, index);
+        for (const plan of this.plansForPiece(index)) {
+            if (plan.file.length === 0) continue;
+            const src = this.existingSource(plan);
+            if (!src) return false;
+            const fileEnd = plan.file.offsetInTorrent + plan.file.length;
+            const fileOffsetEnd = Math.min(end, fileEnd) - plan.file.offsetInTorrent;
+            if (fileOffsetEnd > src.limit) return false;
+        }
+        return true;
     }
 
     // A piece can be trusted from the cache only when every file feeding it is
@@ -425,7 +483,21 @@ export class Storage {
     // physically on disk — the existing output file (clamped to its real size,
     // remaining bytes left as zeros) when present, else the temp file — and
     // never throws, so a scan can salvage partial/mismatched output.
-    private async readAt(absoluteOffset: number, length: number, mode: "active" | "existing" = "active"): Promise<Buffer> {
+    // Open a file read-only, reusing a previously-opened handle from `cache` when
+    // given one (so a verify pass opens each file once instead of per piece). The
+    // cache stores the in-flight open *promise*, so concurrent callers for the
+    // same path share one handle rather than each opening (and leaking) their own.
+    private openRead(p: string, cache?: Map<string, Promise<FileHandle | undefined>>): Promise<FileHandle | undefined> {
+        if (!cache) return open(p, fsConstants.O_RDONLY).catch(() => undefined);
+        let pending = cache.get(p);
+        if (!pending) {
+            pending = open(p, fsConstants.O_RDONLY).catch(() => undefined);
+            cache.set(p, pending);
+        }
+        return pending;
+    }
+
+    private async readAt(absoluteOffset: number, length: number, mode: "active" | "existing" = "active", handles?: Map<string, Promise<FileHandle | undefined>>): Promise<Buffer> {
         const out = Buffer.alloc(length);
         for (const plan of this.filePlans) {
             const file = plan.file;
@@ -441,12 +513,13 @@ export class Storage {
                 const src = this.existingSource(plan);
                 if (!src || fileOffset >= src.limit) continue; // no data here → leave zeros
                 const avail = Math.min(sliceLength, src.limit - fileOffset);
-                const handle = await open(src.path, fsConstants.O_RDONLY).catch(() => undefined);
+                const handle = await this.openRead(src.path, handles);
                 if (!handle) continue;
                 try {
                     diskIO.bytesRead += await readFully(handle, out, outOffset, avail, fileOffset);
                 } finally {
-                    await handle.close();
+                    // Leave cached handles open; the verify pass closes them once.
+                    if (!handles) await handle.close();
                 }
                 continue;
             }
