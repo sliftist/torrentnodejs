@@ -102,7 +102,7 @@ export class WebCommandServer {
                 items.push(
                     `<li><a href="${escapeHtml(link)}">${escapeHtml(f.path)}</a>` +
                     ` (${formatBytes(f.length)}) ` +
-                    `<button onclick="playVideo('${escapeAttr(link)}')">video</button></li>`
+                    `<button data-name="${escapeHtml(f.path)}" data-src="${escapeHtml(link)}">video</button></li>`
                 );
             }
         }
@@ -248,10 +248,6 @@ function escapeHtml(s: string): string {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-function escapeAttr(s: string): string {
-    return escapeHtml(s).replace(/'/g, "&#39;");
-}
-
 function indexHtml(list: string): string {
     return `<!doctype html>
 <html>
@@ -262,7 +258,10 @@ function indexHtml(list: string): string {
 ${list}
 </ul>
 <script>
-function playVideo(src) {
+// Map of file name -> file URL, so a "play" query param can resolve to a src
+// even after a refresh re-fetches this list.
+var FILES = {};
+function playSrc(src) {
     document.body.innerHTML = "";
     document.body.style.margin = "0";
     document.body.style.background = "#000";
@@ -277,6 +276,22 @@ function playVideo(src) {
     v.style.height = "100vh";
     document.body.appendChild(v);
 }
+function playByName(name) {
+    // Record the playing video in the URL (keeping the password) so a refresh
+    // resumes it, then play without a full reload.
+    var params = new URLSearchParams(location.search);
+    params.set("play", name);
+    history.replaceState(undefined, "", location.pathname + "?" + params.toString());
+    if (FILES[name]) playSrc(FILES[name]);
+}
+Array.prototype.forEach.call(document.querySelectorAll("button[data-name]"), function (b) {
+    FILES[b.getAttribute("data-name")] = b.getAttribute("data-src");
+    b.addEventListener("click", function () { playByName(b.getAttribute("data-name")); });
+});
+(function () {
+    var name = new URLSearchParams(location.search).get("play");
+    if (name && FILES[name]) playSrc(FILES[name]);
+})();
 </script>
 </body>
 </html>

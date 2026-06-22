@@ -82,7 +82,8 @@ async function main() {
     assert.equal(index.status, 200, "index should be 200");
     assert.match(String(index.headers["content-type"]), /html/, "index should be HTML");
     assert.match(index.body.toString(), new RegExp(`/file/${infoHash}/0`), "index should link to the file");
-    assert.match(index.body.toString(), /playVideo/, "index should have a video button");
+    assert.match(index.body.toString(), /data-name=/, "index should have a video button with a name");
+    assert.match(index.body.toString(), /play/, "index should read the play query param");
 
     // --- a range request prioritizes the torrent and then hangs (no peers) ---
     let fileResolved = false;
