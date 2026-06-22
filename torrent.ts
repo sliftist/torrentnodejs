@@ -367,22 +367,27 @@ export class Torrent extends EventEmitter {
             peerId: this.peerId,
             numPieces: this.meta.pieceHashes.length,
         });
+        // Wire handlers BEFORE connect so a bitfield the peer sends right after
+        // the handshake isn't emitted into the void during the await gap (which
+        // would leave us never sending `interested`, so the peer never unchokes).
+        this.peerMeta.set(key, { ip: p.ip, port: p.port, direction: "out" });
+        this.wirePeer(key, conn);
         const timeout = setTimeout(() => conn.destroy(), this.peerConnectTimeoutMs);
         try {
             await conn.connect();
             clearTimeout(timeout);
         } catch (e) {
             clearTimeout(timeout);
+            this.peerMeta.delete(key);
             throw e;
         }
         if (this.stopped) { conn.destroy(); this.options.connectionBudget?.release(); return; }
         this.peerConnections.set(key, conn);
-        this.peerMeta.set(key, { ip: p.ip, port: p.port, direction: "out" });
         this.inflightPerPeer.set(key, 0);
         if (this.full()) this.options.chokeManager?.add(conn);
         this.emit("peer-connect", { ip: p.ip, port: p.port, peerId: conn.remotePeerId.toString("hex") });
-        this.wirePeer(key, conn);
         conn.sendBitfield(this.pieceManager.haveBitfield.bytes);
+        void this.pumpRequests(key);
     }
 
     private wirePeer(key: string, conn: PeerConnection): void {

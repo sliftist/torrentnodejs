@@ -167,9 +167,12 @@ export class Storage {
         for (const plan of this.filePlans) {
             if (!plan.allocated || plan.finalized) continue;
             if (!this.fileComplete(plan.file, have)) continue;
+            // Claim the rename synchronously, before any await, so concurrent
+            // per-piece finalize calls don't both try to rename the same temp
+            // file (the second would ENOENT after the first moved it).
+            plan.finalized = true;
             await mkdir(path.dirname(plan.finalPath), { recursive: true });
             await rename(plan.tempPath, plan.finalPath);
-            plan.finalized = true;
         }
         if (this.filePlans.every((p) => !p.allocated || p.finalized)) {
             await rm(this.incompleteDir(), { recursive: true, force: true }).catch(() => {});

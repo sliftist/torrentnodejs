@@ -4,11 +4,14 @@ import path from "path";
 import { spawn } from "child_process";
 import { mkdtemp, rm, mkdir, writeFile, readdir } from "fs/promises";
 import { encode } from "../bencode";
-import { parseTorrentFile } from "../torrentFile";
+import { parseTorrentFile, parseTorrentBuffer } from "../torrentFile";
 import { TorrentManager } from "../cli/torrentManager";
 import { DEFAULT_SCHEDULER } from "../cli/config";
 import { NodeTransport } from "../transport";
 import { diskIO, cacheStats } from "../storage";
+import { Torrent } from "../torrent";
+import { PeerListener } from "../peerListener";
+import { ChokeManager } from "../chokeManager";
 
 // Standalone, no-network reproduction of "scan" run mode. Generates torrents,
 // writes their data to a downloads dir, then runs the real TorrentManager in
@@ -220,6 +223,99 @@ async function orchestrate(): Promise<void> {
     }
 }
 
+const DOWNLOAD_TORRENTS = 6;
+const DOWNLOAD_PIECES = 12;
+
+// Generate a handful of complete single-file torrents: real data lives in
+// seedDir (the seeder serves it), the .torrent files go in sources.
+async function setupDownload(root: string): Promise<{ seedDir: string; downloads: string; sources: string }> {
+    const seedDir = path.join(root, "seed");
+    const downloads = path.join(root, "downloads");
+    const sources = path.join(root, "sources");
+    await mkdir(seedDir, { recursive: true });
+    await mkdir(downloads, { recursive: true });
+    await mkdir(sources, { recursive: true });
+
+    for (let i = 0; i < DOWNLOAD_TORRENTS; i++) {
+        const name = `dl-${i}`;
+        const data = crypto.randomBytes(PIECE_LENGTH * DOWNLOAD_PIECES - 7);
+        await writeFile(path.join(seedDir, name), data);
+        await writeFile(path.join(sources, `${name}.torrent`), buildTorrentBuffer(name, data, false));
+    }
+    return { seedDir, downloads, sources };
+}
+
+// Run a real loopback swarm: one seeder per torrent (seedExisting, served via a
+// shared listener + active choke manager) and one leecher per torrent dialing
+// 127.0.0.1. Resolves once every leecher has downloaded + verified, then tears
+// everything down so the on-disk files in `downloads` are the finalized output.
+async function realDownload(seedDir: string, downloads: string, sources: string): Promise<void> {
+    const transport = new NodeTransport();
+    const listener = new PeerListener(transport);
+    await listener.start(0);
+    const seedPort = listener.port();
+    const choke = new ChokeManager({ uploadSlots: DOWNLOAD_TORRENTS + 4, optimisticSlots: 2, intervalMs: 100 });
+    choke.start();
+
+    const seeders: Torrent[] = [];
+    const leechers: Torrent[] = [];
+    for (const f of await readdir(sources)) {
+        if (!f.endsWith(".torrent")) continue;
+        const meta = await parseTorrentFile(path.join(sources, f));
+        const seeder = new Torrent({
+            meta,
+            transport,
+            peerId: crypto.randomBytes(20),
+            options: { saveDir: seedDir, mode: "full", seedExisting: true, downloadEnabled: false, peerListener: listener, chokeManager: choke },
+        });
+        await seeder.start();
+        seeders.push(seeder);
+
+        const leecher = new Torrent({
+            meta,
+            transport,
+            peerId: crypto.randomBytes(20),
+            options: { saveDir: downloads, mode: "full", downloadEnabled: true, extraPeers: [{ ip: "127.0.0.1", port: seedPort }] },
+        });
+        await leecher.start();
+        leechers.push(leecher);
+    }
+
+    const progressTimer = setInterval(() => {
+        const done = leechers.filter((l) => l.progress >= 1).length;
+        const peers = leechers.reduce((n, l) => n + l.connectedPeers, 0);
+        const unchoked = leechers.reduce((n, l) => n + l.peersUnchokingUs, 0);
+        const avg = (leechers.reduce((n, l) => n + l.progress, 0) / leechers.length * 100).toFixed(1);
+        const sConns = seeders.reduce((n, s) => n + s.connectedPeers, 0);
+        const sUnchoked = seeders.reduce((n, s) => n + s.peersWeUnchoked, 0);
+        console.log(`  [dl] done=${done}/${leechers.length} avgProgress=${avg}% leechConns=${peers} unchokingUs=${unchoked} | seedConns=${sConns} seedUnchoked=${sUnchoked}`);
+    }, 1000);
+    progressTimer.unref?.();
+    await Promise.all(leechers.map((l) => l.complete()));
+    clearInterval(progressTimer);
+
+    for (const l of leechers) await l.stop();
+    for (const s of seeders) await s.stop();
+    choke.stop();
+    listener.close();
+}
+
+// The user's exact scenario: download real torrents over loopback, finish, kill,
+// scan (separate process), kill, scan again — the second scan must hit the
+// cross-process verified-piece cache instead of re-hashing.
+async function orchestrateDownload(): Promise<void> {
+    const root = await mkdtemp(path.join(os.tmpdir(), "bt-check-download-"));
+    try {
+        const { seedDir, downloads, sources } = await setupDownload(root);
+        console.log(`Downloading ${DOWNLOAD_TORRENTS} torrents over loopback...`);
+        await realDownload(seedDir, downloads, sources);
+        console.log("Download complete. Running two scans in separate processes.");
+        await twoPassVerdict(downloads, sources, false);
+    } finally {
+        await rm(root, { recursive: true, force: true });
+    }
+}
+
 async function main() {
     const cmd = process.argv[2];
     if (cmd === "scan") {
@@ -233,7 +329,11 @@ async function main() {
         await twoPassVerdict(downloads, sources, false);
         return;
     }
-    await orchestrate();
+    if (cmd === "synthetic") {
+        await orchestrate();
+        return;
+    }
+    await orchestrateDownload();
 }
 
 main().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); });
