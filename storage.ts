@@ -409,14 +409,26 @@ export class Storage {
         return result;
     }
 
-    // FilePlans whose byte range overlaps piece `index`.
+    // FilePlans whose byte range overlaps piece `index`. filePlans are contiguous
+    // and sorted by offset, so binary-search to the first overlapping file and
+    // walk forward — O(log files + overlap) instead of scanning every file per
+    // piece, which was quadratic on huge multi-file torrents during verify.
     private plansForPiece(index: number): FilePlan[] {
         const start = index * this.meta.pieceLength;
         const end = start + pieceLengthAt(this.meta, index);
+        let lo = 0;
+        let hi = this.filePlans.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            const plan = this.filePlans[mid];
+            if (plan.file.offsetInTorrent + plan.file.length > start) hi = mid;
+            else lo = mid + 1;
+        }
         const out: FilePlan[] = [];
-        for (const plan of this.filePlans) {
-            const fEnd = plan.file.offsetInTorrent + plan.file.length;
-            if (start < fEnd && end > plan.file.offsetInTorrent) out.push(plan);
+        for (let i = lo; i < this.filePlans.length; i++) {
+            const plan = this.filePlans[i];
+            if (plan.file.offsetInTorrent >= end) break;
+            out.push(plan);
         }
         return out;
     }
