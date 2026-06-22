@@ -145,6 +145,10 @@ export interface AggregateView {
     diskBytesWritten: number;
     diskReadRate: number;
     diskWriteRate: number;
+    // Estimated ms until every in-progress verify finishes: total bytes still to
+    // read across all verifying torrents, divided by the current disk read rate.
+    // 0 = nothing verifying / not enough disk speed sampled yet.
+    verifyEtaMs: number;
 }
 
 export interface TorrentDetail {
@@ -792,6 +796,7 @@ export class TorrentManager extends EventEmitter {
 
     aggregate(): AggregateView {
         let downloading = 0, seeding = 0, paused = 0, downRate = 0, upRate = 0, dl = 0, ul = 0;
+        let verifyBytesRemaining = 0;
         for (const m of this.torrents.values()) {
             const complete = this.isComplete(m);
             if (m.paused) paused++;
@@ -801,7 +806,10 @@ export class TorrentManager extends EventEmitter {
             upRate += m.upRate;
             dl += m.torrent?.downloadedBytes ?? 0;
             ul += m.torrent?.uploadedBytes ?? 0;
+            const vp = m.torrent?.verifyProgress;
+            if (vp) verifyBytesRemaining += Math.max(0, vp.bytesToRead - vp.bytesRead);
         }
+        const verifyEtaMs = verifyBytesRemaining > 0 && this.diskReadRate > 0 && (verifyBytesRemaining / this.diskReadRate) * 1000 || 0;
         const wire = this.transport.trafficStats?.();
         return {
             torrents: this.torrents.size,
@@ -823,6 +831,7 @@ export class TorrentManager extends EventEmitter {
             diskBytesWritten: diskIO.bytesWritten,
             diskReadRate: this.diskReadRate,
             diskWriteRate: this.diskWriteRate,
+            verifyEtaMs,
         };
     }
 

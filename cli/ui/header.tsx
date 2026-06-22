@@ -2,7 +2,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import { AggregateView } from "../torrentManager";
 import { RunMode, RUN_MODES, MODE_LABEL, MODE_DESC } from "../config";
-import { formatBytes, formatRate, formatNumber } from "./format";
+import { formatBytes, formatRate, formatNumber, formatEta } from "./format";
 
 export function Header(props: { agg: AggregateView; localIP: string; width: number; mode: RunMode }) {
     const { agg, localIP, width, mode } = props;
@@ -42,6 +42,7 @@ export function Header(props: { agg: AggregateView; localIP: string; width: numb
                 <Text color="cyan">{`read ${formatRate(agg.diskReadRate)}  `}</Text>
                 <Text color="green">{`write ${formatRate(agg.diskWriteRate)}   `}</Text>
                 <Text dimColor>{`total r ${formatBytes(agg.diskBytesRead)} w ${formatBytes(agg.diskBytesWritten)}`}</Text>
+                {agg.verifyEtaMs > 0 && <Text color="blue">{`   verify ETA ${formatEta(agg.verifyEtaMs / 1000)}`}</Text> || undefined}
             </Box>
             <Box>
                 <Text dimColor>tunnel </Text>
