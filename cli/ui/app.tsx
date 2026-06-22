@@ -52,10 +52,10 @@ const MENU_WIDTH = 36;
 
 // Fixed vertical chrome around the scrollable body, so the table is told
 // exactly how many lines it may use. Header = 6 content rows + 2 border lines;
-// Footer = 3 content rows (hint, sources, output) + 2 border lines; plus the
-// body's own marginTop. Keep these in sync with the Header/Footer components.
+// Footer = 4 content rows (hint, sources, output, web) + 2 border lines; plus
+// the body's own marginTop. Keep these in sync with the Header/Footer components.
 const HEADER_HEIGHT = 8;
-const FOOTER_HEIGHT = 5;
+const FOOTER_HEIGHT = 6;
 const BODY_MARGIN_TOP = 1;
 const CHROME_HEIGHT = HEADER_HEIGHT + FOOTER_HEIGHT + BODY_MARGIN_TOP;
 
@@ -321,6 +321,7 @@ export function App(props: AppProps) {
                 folders={watcher.watchedFolders}
                 output={manager.outputDir}
                 notice={notice}
+                webUrl={webUrl}
             />
         </Box>
     );
@@ -374,8 +375,9 @@ function Footer(props: {
     folders: string[];
     output: string;
     notice: string;
+    webUrl?: string;
 }) {
-    const { width, view, overlay, filter, folderDraft, folders, output, notice } = props;
+    const { width, view, overlay, filter, folderDraft, folders, output, notice, webUrl } = props;
 
     let topLine: React.ReactNode;
     if (overlay === "filter") {
@@ -418,6 +420,10 @@ function Footer(props: {
             </Box>
             <Box>
                 <Text dimColor>{`output: ${truncate(output, width - 12)}`}</Text>
+            </Box>
+            <Box>
+                <Text dimColor>web: </Text>
+                <Text color={webUrl && "cyan" || "gray"}>{webUrl && truncate(webUrl, width - 8) || "(not started)"}</Text>
             </Box>
         </Box>
     );

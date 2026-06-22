@@ -55,7 +55,7 @@ async function main() {
     try {
         await webServer.start();
         webPassword = webServer.password;
-        webUrl = `https://<this-host>:${config.webPort}/?password=${encodeURIComponent(webPassword)}`;
+        webUrl = `https://localhost:${config.webPort}/?password=${encodeURIComponent(webPassword)}`;
         process.stdout.write(`Web control on port ${config.webPort}. Password: ${webPassword}\n`);
     } catch (e) {
         process.stdout.write(`Web control failed to start: ${(e as Error).message}\n`);
