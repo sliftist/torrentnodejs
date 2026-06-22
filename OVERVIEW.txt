@@ -1,0 +1,145 @@
+BitTorrent client — high-level overview
+
+This is the "what are we trying to do" companion to spec.txt (which holds the
+concrete numbers and rules). Read this first for the shape of the system; read
+spec.txt for the limits.
+
+
+What this project is
+====================
+
+A tracker-only BitTorrent client written in pure TypeScript (no DHT, no PEX,
+no LPD, no magnet links). It can parse a .torrent, find peers through its
+trackers, download and verify every piece to disk, and then seed what it has
+back to the swarm. A terminal UI (and a small web UI) drives many torrents at
+once under global limits.
+
+The one architectural bet: all networking goes through a single Transport
+interface (TCP connect, UDP socket, HTTP fetch). Today that's backed by Node's
+net/dgram/http; swapping in WireGuardNetwork is a one-line change because it
+already implements the same shape. Nothing above the transport layer knows or
+cares which one is in use.
+
+
+The layers (bottom to top)
+==========================
+
+  bencode / torrentFile      Parse a .torrent. The info_hash is the SHA-1 of
+                             the EXACT source bytes of the info dict, not a
+                             re-encode, so it matches other clients precisely.
+
+  transport                  The swap point. net/dgram/http by default.
+
+  trackerHttp / trackerUdp   Speak to one tracker (BEP 3 HTTP, BEP 15 UDP):
+  trackerPool                announce/scrape, parse compact peer lists, and
+                             re-announce on each tracker's own interval.
+
+  peerConnection             One peer wire: the 68-byte handshake plus the
+                             length-prefixed message protocol (choke, have,
+                             bitfield, request, piece, ...). Tracks both sides'
+                             choke/interest state.
+
+  pieceManager / bitfield    The bookkeeping brain: which pieces and which
+                             16 KB blocks we still need, who has what (rarity),
+                             which picker to use, and SHA-1 verification of a
+                             completed piece against the hash list.
+
+  storage                    The piece<->disk mapping. Writes blocks to the
+                             right file+offset, verifies on-disk data, and
+                             caches verification results.
+
+  torrent                    One active torrent. Wires the layers above
+                             together and runs the lifecycle (below).
+
+  client / torrentManager    Owns MANY torrents and enforces the global budgets
+                             (connections, bandwidth, download slots, upload
+                             slots). torrentManager is the real orchestrator the
+                             CLI/web UIs sit on; client is the minimal library
+                             entry point.
+
+
+Three run modes (how far a torrent goes)
+========================================
+
+A torrent can be brought up to one of three depths. This is the single biggest
+"what are we doing right now" switch.
+
+  scan    Open the files and SHA-1-verify what's already on disk. No network at
+          all. Used to answer "what do I actually have?" fast, on startup.
+
+  scrape  Do the scan, then ask trackers for swarm stats (seeders / leechers /
+          peers). Still no announce, no peer connections, no data transfer —
+          just gathering swarm info before committing to a full download.
+
+  full    Everything: announce, accept and dial peers, download missing pieces,
+          and upload/seed. The default.
+
+
+The per-torrent lifecycle (full mode)
+=====================================
+
+  1. Open + resume.   Open storage. Verify the pieces already on disk and mark
+                      the valid ones as "have", so we only fetch what's missing.
+                      Salvageable bytes from a wrong-sized output file are
+                      imported into the in-progress temp copy; the user's
+                      original output file is never mutated until completion.
+
+  2. Find peers.      Start the tracker pool; announce to every tracker and
+                      re-announce on their intervals. New peer addresses flow
+                      into the connection logic. Inbound peers arrive through
+                      one shared listener, demultiplexed by info_hash.
+
+  3. Download.        Tell peers we're Interested. When a peer unchokes us,
+                      pipeline several block requests at once. Pick pieces by:
+                      finish-partial-pieces-first, then rarest-first, then an
+                      endgame mode near 100% so the last blocks don't stall.
+                      Each completed piece is SHA-1-verified before it counts;
+                      a verified piece is announced to peers with `have`.
+
+  4. Finish.          When every selected piece is present and verified, the
+                      temp file is atomically renamed into the output folder.
+
+  5. Seed.            Stay connected and upload to peers. Choose who to unchoke
+                      by tit-for-tat (favor peers who feed us), plus a rotating
+                      optimistic-unchoke slot to discover better peers. We never
+                      serve a piece we haven't re-confirmed on disk.
+
+
+Global orchestration (many torrents at once)
+============================================
+
+torrentManager runs every torrent under shared, machine-wide budgets rather
+than letting each torrent grab whatever it wants:
+
+  - ALL torrents announce and may connect to peers.
+  - A limited pool of DOWNLOAD SLOTS decides which incomplete torrents actively
+    request block data. It's a rolling queue: new torrents jump to the front;
+    a torrent making no progress for too long is evicted so a waiting one can
+    run; a torrent with no peers doesn't waste a slot at all.
+  - Connection count, download bitrate, upload bitrate, and upload (unchoke)
+    slots are all global limits enforced through shared services, not per
+    torrent.
+
+The UI groups torrents into the lists that fall out of this: verifying,
+downloading actively, seeding actively, downloading-but-queued (no free slot),
+downloading-but-no-peers, and seeding-but-idle.
+
+
+Storage discipline (a recurring theme)
+======================================
+
+  - Files are pre-allocated to full size so blocks can be written to exact
+    offsets (sparse on disk).
+  - In-progress data lives in a temp directory ON THE SAME DRIVE as the output,
+    so finishing a file is a single atomic rename, never a cross-device copy.
+  - No long-lived file handles: open, do the I/O, close — to avoid running out
+    of descriptors across thousands of torrents.
+  - Verification results are cached per file by (size + mtime), so a restart
+    trusts unchanged files instead of re-hashing every byte on every startup.
+
+
+Out of scope (on purpose)
+=========================
+
+DHT, PEX, LPD, magnet links, WebRTC/WebTorrent, encryption, IPv6, uTP. All of
+these can be added later behind the existing layers without reshaping anything.
