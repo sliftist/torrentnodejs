@@ -10,6 +10,7 @@ import { PeerListener } from "../peerListener";
 import { RateLimiter } from "../rateLimiter";
 import { ChokeManager } from "../chokeManager";
 import { ConnectionBudget } from "../connectionBudget";
+import { AnnounceGate } from "../announceGate";
 import { DialStats } from "../dialStats";
 import { Storage, diskIO } from "../storage";
 import { trackerlessTorrent } from "../createTorrent";
@@ -28,6 +29,10 @@ const RATE_ALPHA = 0.35; // EMA smoothing for rates
 // A complete torrent counts as "seeding actively" if it has uploaded within
 // this window; otherwise it's idle (no one has downloaded recently).
 const SEED_ACTIVE_WINDOW_MS = 60 * 1000;
+// Most tracker announces in flight at once across every torrent. With thousands
+// of torrents, announcing all at once buries the single tunnel and most requests
+// never get a response; this keeps a bounded number going so each completes.
+const MAX_CONCURRENT_ANNOUNCES = 24;
 // 1 megabit per second = 125000 bytes per second.
 const BYTES_PER_MBIT = 125000;
 const CHOKE_INTERVAL_MS = 10 * 1000;
@@ -318,6 +323,7 @@ export class TorrentManager extends EventEmitter {
     private priorityUploadLimiter?: RateLimiter;
     private chokeManager?: ChokeManager;
     private connectionBudget?: ConnectionBudget;
+    private announceGate?: AnnounceGate;
     private dialStats?: DialStats;
 
     constructor(opts: TorrentManagerOptions) {
@@ -410,6 +416,7 @@ export class TorrentManager extends EventEmitter {
         this.priorityUploadLimiter = new RateLimiter((this.scheduler.uploadMbps * BYTES_PER_MBIT) / 2);
         this.connectionBudget = new ConnectionBudget(this.scheduler.activeConnections);
         this.dialStats = new DialStats();
+        this.announceGate = new AnnounceGate(MAX_CONCURRENT_ANNOUNCES);
         this.chokeManager = new ChokeManager({
             uploadSlots: this.scheduler.uploadSlots,
             optimisticSlots: this.scheduler.optimisticUnchokeSlots,
@@ -1336,6 +1343,7 @@ export class TorrentManager extends EventEmitter {
                 chokeManager: this.chokeManager,
                 connectionBudget: this.connectionBudget,
                 dialStats: this.dialStats,
+                announceGate: this.announceGate,
                 listenPort: this.listenPort,
             },
         });

@@ -11,6 +11,7 @@ import { PeerListener, InboundPeer } from "./peerListener";
 import { RateLimiter } from "./rateLimiter";
 import { ChokeManager } from "./chokeManager";
 import { ConnectionBudget } from "./connectionBudget";
+import { AnnounceGate } from "./announceGate";
 import { DialStats } from "./dialStats";
 import { yieldIfBlocked } from "./cooperativeYield";
 
@@ -57,6 +58,8 @@ export interface TorrentOptions {
     connectionBudget?: ConnectionBudget;
     // Counts outbound dials and the ones that fail, across all torrents.
     dialStats?: DialStats;
+    // Bounds concurrent tracker announces across every torrent.
+    announceGate?: AnnounceGate;
     // Port to report to trackers when there's no shared listener.
     listenPort?: number;
 }
@@ -163,6 +166,7 @@ export class Torrent extends EventEmitter {
         this.tracker = new TrackerPool({
             transport: this.transport,
             trackers: config.meta.announceList,
+            gate: config.options.announceGate,
             // Scrape mode gathers swarm stats without joining the swarm.
             scrape: (config.options.mode ?? "full") === "scrape",
             params: () => ({

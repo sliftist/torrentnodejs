@@ -2,10 +2,15 @@ import { EventEmitter } from "events";
 import { Transport } from "./transport";
 import { AnnounceParams, TrackerAnnounceResult, TrackerScrapeResult, PeerAddress, announceHttp, scrapeHttp } from "./trackerHttp";
 import { announceUdp, scrapeUdp } from "./trackerUdp";
+import { AnnounceGate } from "./announceGate";
 
 // Scrape carries no tracker-suggested interval, so we poll swarm stats on a
 // fixed, gentle cadence.
 const SCRAPE_INTERVAL_SEC = 120;
+// After repeated failures we back off hard but never abandon a tracker: a tracker
+// that failed during a startup announce storm must keep retrying, or a seeding
+// torrent silently stops talking to its trackers forever.
+const FAILURE_BACKOFF_SEC = 300;
 
 export interface TrackerPoolOptions {
     transport: Transport;
@@ -15,6 +20,9 @@ export interface TrackerPoolOptions {
     minIntervalSec?: number;
     // When true, only scrape swarm stats — never announce, never surface peers.
     scrape?: boolean;
+    // Shared across every torrent so a huge library doesn't fire thousands of
+    // announces at once and starve the tunnel.
+    gate?: AnnounceGate;
 }
 
 export interface TrackerStat {
@@ -92,7 +100,8 @@ export class TrackerPool extends EventEmitter {
         let consecutiveFailures = 0;
         while (!this.stopped) {
             try {
-                const result = await this.announceOnce(url, event);
+                const ev = event;
+                const result = await this.withGate(() => this.announceOnce(url, ev));
                 event = undefined;
                 consecutiveFailures = 0;
                 this.statsByUrl.set(url, {
@@ -123,8 +132,11 @@ export class TrackerPool extends EventEmitter {
                     lastAnnounceMs: Date.now(),
                 });
                 this.emit("tracker-error", { url, error: e });
-                if (consecutiveFailures >= this.maxFails) return;
-                await this.interruptibleSleep(30_000);
+                // Never give up: a tracker that failed (often just a congested
+                // startup) keeps being retried, on a long backoff once it's been
+                // failing for a while, so seeding torrents recover their trackers.
+                const backoffSec = (consecutiveFailures >= this.maxFails && FAILURE_BACKOFF_SEC) || 30;
+                await this.interruptibleSleep(backoffSec * 1000);
             }
         }
     }
@@ -133,7 +145,7 @@ export class TrackerPool extends EventEmitter {
         let consecutiveFailures = 0;
         while (!this.stopped) {
             try {
-                const result = await this.scrapeOnce(url);
+                const result = await this.withGate(() => this.scrapeOnce(url));
                 consecutiveFailures = 0;
                 this.statsByUrl.set(url, {
                     url,
@@ -154,10 +166,17 @@ export class TrackerPool extends EventEmitter {
                     lastAnnounceMs: Date.now(),
                 });
                 this.emit("tracker-error", { url, error: e });
-                if (consecutiveFailures >= this.maxFails) return;
-                await this.interruptibleSleep(30_000);
+                const backoffSec = (consecutiveFailures >= this.maxFails && FAILURE_BACKOFF_SEC) || 30;
+                await this.interruptibleSleep(backoffSec * 1000);
             }
         }
+    }
+
+    // Run a tracker request under the shared gate when one is configured, so the
+    // whole process keeps a bounded number of announces in flight at once.
+    private withGate<T>(fn: () => Promise<T>): Promise<T> {
+        if (!this.opts.gate) return fn();
+        return this.opts.gate.run(fn);
     }
 
     private scrapeOnce(url: string): Promise<TrackerScrapeResult> {
