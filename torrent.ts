@@ -104,6 +104,11 @@ export class Torrent extends EventEmitter {
     // never ran), so the UI only shows scan progress while it's actually
     // happening.
     private verifyProgressField: { piecesRead: number; piecesToRead: number } | undefined;
+    // When the on-disk verification started, and when it finished (0 = still
+    // running). Lets the UI show how long a torrent has been verifying so a
+    // scan that's wedged on one torrent is obvious.
+    private verifyStartedAtField = 0;
+    private verifyFinishedAtField = 0;
     private readonly options: TorrentOptions;
 
     constructor(config: {
@@ -238,6 +243,8 @@ export class Torrent extends EventEmitter {
     get hasMismatchedOutput(): boolean { return this.storage.hasMismatchedOutput(this.pieceManager.haveBitfield); }
     get verifyTarget(): "output" | "temp" { return this.storage.verifyTarget; }
     get verifyProgress() { return this.verifyProgressField; }
+    get verifyStartedAt() { return this.verifyStartedAtField; }
+    get verifyFinishedAt() { return this.verifyFinishedAtField; }
     get trackerStats() { return this.tracker.trackerStats; }
     get pieceStates() { return this.pieceManager.pieceStates(); }
     get pieceCounts() { return this.pieceManager.pieceCounts; }
@@ -255,12 +262,14 @@ export class Torrent extends EventEmitter {
         } else if (this.options.verifyExisting) {
             // Only a real download (full mode) seeds the temp file from salvaged
             // output; a scan just reports what's actually on disk.
+            this.verifyStartedAtField = Date.now();
             this.verifyProgressField = { piecesRead: 0, piecesToRead: 0 };
             const have = await this.storage.verifyExistingPieces(this.pieceManager.selected, {
                 importToTemp: mode === "full",
                 onProgress: (p) => { this.verifyProgressField = p; },
             });
             this.verifyProgressField = undefined;
+            this.verifyFinishedAtField = Date.now();
             this.pieceManager.markHaves(have);
             await this.storage.finalizeFiles(this.pieceManager.haveBitfield);
             if (this.pieceManager.isComplete()) this.emit("complete");

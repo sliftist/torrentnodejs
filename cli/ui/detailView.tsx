@@ -1,7 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { TorrentDetail, TorrentView } from "../torrentManager";
-import { formatBytes, formatRate, formatPercent, formatEta, progressBar, truncate } from "./format";
+import { formatBytes, formatRate, formatPercent, formatEta, formatDateTime, progressBar, truncate } from "./format";
 
 export const DETAIL_TABS = ["general", "peers", "trackers", "pieces", "files"] as const;
 export type DetailTab = (typeof DETAIL_TABS)[number];
@@ -66,6 +66,13 @@ function GeneralTab(props: { view: TorrentView; detail: TorrentDetail }) {
         ["Pieces", `${detail.pieceCounts.done} done / ${detail.pieceCounts.downloading} active / ${detail.pieceCounts.needed} needed`],
         ["Source", view.sourcePath],
     ];
+    if (detail.verifyStartedAtMs > 0) {
+        const verifying = detail.verifyDoneAtMs === 0;
+        const elapsedMs = (detail.verifyDoneAtMs || Date.now()) - detail.verifyStartedAtMs;
+        rows.push(["Verify started", formatDateTime(detail.verifyStartedAtMs)]);
+        const progress = detail.verifyPiecesToRead > 0 && ` · ${detail.verifyPiecesRead}/${detail.verifyPiecesToRead} chunks` || "";
+        rows.push([verifying && "Verifying for" || "Verified in", `${formatEta(elapsedMs / 1000)}${verifying && progress || ""}`]);
+    }
     if (view.prioritized || view.rangeOutstanding > 0 || view.rangeFinished > 0) {
         const flag = view.prioritized && "prioritized" || "normal";
         rows.push(["Range requests", `${view.rangeOutstanding} active / ${view.rangeFinished} done · ${flag}`]);

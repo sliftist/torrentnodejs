@@ -154,6 +154,13 @@ export interface TorrentDetail {
     trackers: { url: string; status: string; seeders?: number; leechers?: number; peers?: number; error?: string }[];
     pieceStates: ("needed" | "downloading" | "done")[];
     pieceCounts: { needed: number; downloading: number; done: number };
+    // On-disk verification timing (epoch ms; 0 = not applicable). verifyDoneAtMs
+    // stays 0 while a verify is still running, so the UI can show elapsed time
+    // ticking up and spot a torrent that's wedged on verification.
+    verifyStartedAtMs: number;
+    verifyDoneAtMs: number;
+    verifyPiecesRead: number;
+    verifyPiecesToRead: number;
 }
 
 interface ManagedTorrent {
@@ -796,6 +803,10 @@ export class TorrentManager extends EventEmitter {
             })),
             pieceStates: t?.pieceStates ?? [],
             pieceCounts: t?.pieceCounts ?? { needed: 0, downloading: 0, done: m.meta.pieceHashes.length },
+            verifyStartedAtMs: t?.verifyStartedAt ?? 0,
+            verifyDoneAtMs: t?.verifyFinishedAt ?? 0,
+            verifyPiecesRead: t?.verifyProgress?.piecesRead ?? 0,
+            verifyPiecesToRead: t?.verifyProgress?.piecesToRead ?? 0,
         };
     }
 
