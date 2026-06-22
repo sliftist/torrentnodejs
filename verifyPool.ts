@@ -1,5 +1,6 @@
 import { Worker } from "worker_threads";
 import os from "os";
+import { sharedWatchdog } from "./watchdog";
 
 // Each file feeding the torrent's byte stream, plus where its bytes physically
 // live right now (the final output file or a temp copy). srcPath undefined means
@@ -182,6 +183,7 @@ interface Pending {
     resolve: (result: VerifyResult) => void;
     reject: (error: Error) => void;
     onProgress?: (progress: VerifyProgress) => void;
+    startedMs?: number;
 }
 
 // A queued verify carries a builder, not a built job: the heavy index/hash
@@ -246,6 +248,7 @@ export class VerifyPool {
         if (this.pending.size === 0) for (const w of this.workers) w.unref();
         this.pump();
         if (!entry) return;
+        if (entry.startedMs) sharedWatchdog().recordWorker("verify (hash)", Date.now() - entry.startedMs);
         if (msg.type === "error") {
             entry.reject(new Error(msg.message));
             return;
@@ -286,6 +289,7 @@ export class VerifyPool {
 
     private dispatch(worker: Worker, id: number, buildJob: BuildJob, pending: Pending) {
         if (this.pending.size === 0) for (const w of this.workers) w.ref();
+        pending.startedMs = Date.now();
         this.pending.set(id, pending);
         const job = buildJob();
         job.maxBytesPerSec = this.maxBytesPerSec;

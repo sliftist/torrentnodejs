@@ -1,5 +1,6 @@
 import { EventEmitter } from "events";
 import { Duplex } from "stream";
+import { measureFnc } from "./measure";
 import { Transport } from "./transport";
 import { Bitfield } from "./bitfield";
 
@@ -262,6 +263,7 @@ export class PeerConnection extends EventEmitter {
         if (offset > 0) this.buffer = Buffer.from(this.buffer.subarray(offset));
     }
 
+    @measureFnc
     private dispatchMessage(msg: Buffer): void {
         if (msg.length === 0) return;
         const id = msg[0];

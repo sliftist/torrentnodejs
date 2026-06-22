@@ -4,6 +4,7 @@ import crypto from "crypto";
 import path from "path";
 import { TorrentMeta, TorrentFile, pieceLengthAt } from "./torrentFile";
 import { Bitfield } from "./bitfield";
+import { measureFnc } from "./measure";
 import { tryStat, pathExists } from "./fsUtils";
 import { sharedVerifyPool, VerifyJob } from "./verifyPool";
 import { yieldIfBlocked } from "./cooperativeYield";
@@ -222,6 +223,7 @@ export class Storage {
         }
     }
 
+    @measureFnc
     async writePiece(pieceIndex: number, data: Buffer): Promise<void> {
         if (!this.opened) throw new Error("Storage not open");
         const expected = pieceLengthAt(this.meta, pieceIndex);

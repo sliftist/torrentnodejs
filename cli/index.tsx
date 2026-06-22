@@ -13,6 +13,7 @@ import { WgTransport } from "./wgTransport";
 import { WebCommandServer } from "./web/webServer";
 import { ensureInspectorUrl, formatDebugUrl } from "./debugUrl";
 import { sharedVerifyPool } from "../verifyPool";
+import { sharedWatchdog } from "../watchdog";
 
 async function ingestCopySource(torrentPath: string, copyDest: string | undefined, manager: TorrentManager): Promise<void> {
     // Without a regular source to archive into, just load it in place.
@@ -109,6 +110,9 @@ async function main() {
     // worker opens its inspector and reports a debug URL we can show before any
     // hashing starts. workerInspectorUrls() fills in over the first moments.
     sharedVerifyPool();
+    // Start the rolling-window profiler so @measureFnc-decorated work is captured
+    // from the very start of the run.
+    sharedWatchdog();
     const getWorkerDebugUrls = () => sharedVerifyPool().workerInspectorUrls().map(formatDebugUrl);
 
     const onAddSource = (folder: string) => {

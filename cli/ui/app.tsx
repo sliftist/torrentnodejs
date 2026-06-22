@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { statSync } from "fs";
+import { formatTime } from "socket-function/src/formatting/format";
+import { sharedWatchdog, WatchdogLine } from "../../watchdog";
 import { TorrentManager, TorrentView } from "../torrentManager";
 import { SourceWatcher } from "../watcher";
 import { normalizeForFilter, truncate } from "./format";
@@ -29,7 +31,7 @@ export interface AppProps {
 
 type View = "list" | "detail";
 // Transient input surfaces drawn over the footer. "none" is the resting state.
-type Overlay = "none" | "actions" | "filter" | "addFolder" | "limits" | "confirmDelete" | "debug";
+type Overlay = "none" | "actions" | "filter" | "addFolder" | "limits" | "confirmDelete" | "debug" | "watchdog";
 
 interface Action {
     label: string;
@@ -64,7 +66,10 @@ const MENU_WIDTH = 36;
 const HEADER_HEIGHT = 8;
 const FOOTER_HEIGHT = 6;
 const BODY_MARGIN_TOP = 1;
-const CHROME_HEIGHT = HEADER_HEIGHT + FOOTER_HEIGHT + BODY_MARGIN_TOP;
+// The collapsed watchdog strip is always on screen: a worker-time summary line
+// above the two busiest main-thread lines.
+const WATCHDOG_BAR_HEIGHT = 3;
+const CHROME_HEIGHT = HEADER_HEIGHT + FOOTER_HEIGHT + BODY_MARGIN_TOP + WATCHDOG_BAR_HEIGHT;
 
 export function App(props: AppProps) {
     const { manager, watcher, localIP, onAddSource, onSchedulerChange, webUrl, webPassword, debugUrl, getWorkerDebugUrls } = props;
@@ -115,6 +120,14 @@ export function App(props: AppProps) {
             manager.off("notice", onNotice);
         };
     }, [manager]);
+
+    useEffect(() => {
+        // Keep the watchdog strip current while the swarm is idle (no manager
+        // updates would otherwise redraw it).
+        const t = setInterval(() => setTick((x) => x + 1), 2000);
+        t.unref?.();
+        return () => clearInterval(t);
+    }, []);
 
     useEffect(() => {
         if (!stdout) return;
@@ -325,9 +338,15 @@ export function App(props: AppProps) {
             return;
         }
 
+        if (overlay === "watchdog") {
+            setOverlay("none");
+            return;
+        }
+
         // Resting state: shared keys first.
         if (input === "a") { setActionIndex(0); setOverlay("actions"); return; }
         if (input === "o") { openLimits(); return; }
+        if (input === "w") { setOverlay("watchdog"); return; }
         if (input === "/") { setOverlay("filter"); return; }
 
         if (view === "detail") {
@@ -361,9 +380,15 @@ export function App(props: AppProps) {
     const debugLines = overlay === "debug"
         ? [`main: ${debugUrl || "(not started)"}`, ...(getWorkerDebugUrls?.() ?? []).map((u, i) => `worker ${i}: ${u}`)]
         : [];
+    const workerLines = sharedWatchdog().workerLines();
+    const mainLines = sharedWatchdog().mainLines();
+    // Expanded watchdog uses ~half the screen; the collapsed 3-line strip already
+    // lives in the chrome, so the overlay only needs the extra rows beyond it.
+    const watchdogPanelHeight = Math.max(8, Math.floor(dims.rows / 2));
     if (overlay === "actions") overlayHeight = actions.length + 4;
     else if (overlay === "confirmDelete" && pendingDelete) overlayHeight = 6;
     else if (overlay === "debug") overlayHeight = debugLines.length + 4;
+    else if (overlay === "watchdog") overlayHeight = Math.max(0, watchdogPanelHeight - WATCHDOG_BAR_HEIGHT);
     else if (overlay === "limits") {
         limitsVisible = Math.max(3, Math.min(LIMIT_FIELDS.length, dims.rows - CHROME_HEIGHT - 7));
         overlayHeight = limitsVisible + 6;
@@ -384,6 +409,9 @@ export function App(props: AppProps) {
             <Box flexDirection="column" flexGrow={1} marginTop={1}>
                 {body}
             </Box>
+            {overlay === "watchdog"
+                && <WatchdogPanel workerLines={workerLines} mainLines={mainLines} width={width} height={watchdogPanelHeight} />
+                || <WatchdogBar workerLines={workerLines} mainLines={mainLines} width={width} />}
             {overlay === "actions" && <ActionsMenu actions={actions} index={actionIndex} />}
             {overlay === "debug" && <DebugMenu lines={debugLines} width={width} />}
             {overlay === "limits" && <LimitsEditor draft={limitsDraft} index={limitIndex} maxVisible={limitsVisible} />}
@@ -432,6 +460,50 @@ function DebugMenu(props: { lines: string[]; width: number }) {
             {lines.map((line, i) => (
                 <Text key={i} color="magenta">{truncate(line, boxWidth - 4)}</Text>
             ))}
+            <Text dimColor>any key close</Text>
+        </Box>
+    );
+}
+
+function fmtWatchdog(l: WatchdogLine): string {
+    return `${l.name}  ${l.count}×  ${formatTime(l.timeMs)} /60s`;
+}
+
+// Always-on 3-line strip: the worker-time summary on top (with the expand hint),
+// then the two busiest main-thread work types below it. Press w to expand.
+function WatchdogBar(props: { workerLines: WatchdogLine[]; mainLines: WatchdogLine[]; width: number }) {
+    const { workerLines, mainLines, width } = props;
+    const worker = workerLines.length
+        && `workers: ${workerLines.map((l) => `${l.name} ${l.count}× ${formatTime(l.timeMs)}`).join("  ")}`
+        || "workers: (idle)";
+    const line1 = `${worker}   · w expand`;
+    const line2 = mainLines[0] && `  ${fmtWatchdog(mainLines[0])}` || "  main: (idle)";
+    const line3 = mainLines[1] && `  ${fmtWatchdog(mainLines[1])}` || " ";
+    return (
+        <Box flexDirection="column" width={width} paddingX={1}>
+            <Text color="cyan">{truncate(line1, width - 4)}</Text>
+            <Text dimColor>{truncate(line2, width - 4)}</Text>
+            <Text dimColor>{truncate(line3, width - 4)}</Text>
+        </Box>
+    );
+}
+
+// Expanded watchdog: full worker summary then the full main-thread breakdown,
+// trimmed to the rows the panel was given.
+function WatchdogPanel(props: { workerLines: WatchdogLine[]; mainLines: WatchdogLine[]; width: number; height: number }) {
+    const { workerLines, mainLines, width, height } = props;
+    const boxWidth = Math.min(width, 120);
+    // 2 border + title + "worker" header + "main" header + footer ≈ 6 fixed rows.
+    const mainBudget = Math.max(1, height - 6 - workerLines.length);
+    return (
+        <Box flexDirection="column" width={boxWidth} height={height} borderStyle="round" borderColor="cyan" paddingX={1}>
+            <Text bold color="cyan">Watchdog — work in the last 60s</Text>
+            <Text color="cyan">worker threads:</Text>
+            {workerLines.length === 0 && <Text dimColor>  (idle)</Text>}
+            {workerLines.map((l) => <Text key={l.name}>{truncate(`  ${fmtWatchdog(l)}`, boxWidth - 4)}</Text>)}
+            <Text color="cyan">main thread:</Text>
+            {mainLines.length === 0 && <Text dimColor>  (no activity)</Text>}
+            {mainLines.slice(0, mainBudget).map((l) => <Text key={l.name}>{truncate(`  ${fmtWatchdog(l)}`, boxWidth - 4)}</Text>)}
             <Text dimColor>any key close</Text>
         </Box>
     );
@@ -550,8 +622,8 @@ function Footer(props: {
 }
 
 function hintFor(view: View): string {
-    if (view === "detail") return "Tab/⇧Tab tabs · ↑↓ scroll · a actions · o options · ← back · ^C quit";
-    return "↑↓ select · →/Enter open · / filter · a actions · o options · Tab mode · ^C quit";
+    if (view === "detail") return "Tab/⇧Tab tabs · ↑↓ scroll · a actions · o options · w watchdog · ← back · ^C quit";
+    return "↑↓ select · →/Enter open · / filter · a actions · o options · w watchdog · Tab mode · ^C quit";
 }
 
 function nextRunMode(current: RunMode): RunMode {

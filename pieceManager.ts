@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { EventEmitter } from "events";
+import { measureFnc } from "./measure";
 import { TorrentMeta, pieceLengthAt } from "./torrentFile";
 import { Bitfield } from "./bitfield";
 
@@ -243,6 +244,7 @@ export class PieceManager extends EventEmitter {
 
     // Pick the next block to request from this peer. Rarest-first across
     // pieces they have AND we need, falling back to random among rarest.
+    @measureFnc
     pickBlock(peerId: string): BlockRequest | undefined {
         const peerBf = this.peerBitfields.get(peerId);
         if (!peerBf) return undefined;
@@ -335,6 +337,7 @@ export class PieceManager extends EventEmitter {
     // Returns the SHA-1-verified, fully-assembled piece buffer if completion
     // and verification succeeded; undefined if the block was stored but the
     // piece isn't complete yet; throws if rejected/duplicate/wrong-hash.
+    @measureFnc
     addBlock(req: BlockRequest, data: Buffer, peerId: string): { kind: "stored"; canceled: CanceledRequest[] } | { kind: "complete"; piece: Buffer; canceled: CanceledRequest[] } | { kind: "duplicate" } | { kind: "rejected"; reason: string } {
         if (!this.selected.has(req.pieceIndex)) return { kind: "rejected", reason: "piece not selected" };
         const piece = this.progress[req.pieceIndex];
