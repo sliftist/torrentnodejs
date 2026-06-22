@@ -23,6 +23,9 @@ export interface VerifyJob {
     hashes: Uint8Array;
     readRunBytes: number;
     wantMismatch: boolean;
+    // Disk-read cap for this worker, in bytes per second (0 = unlimited). The
+    // pool injects it at dispatch from the global verify scan limit.
+    maxBytesPerSec: number;
 }
 
 export interface VerifyResult {
@@ -54,7 +57,7 @@ async function readFully(handle, buffer, offset, length, position) {
 }
 
 async function verify(id, job) {
-    const { files, pieceLength, totalLength, pieceCount, indices, hashes, readRunBytes, wantMismatch } = job;
+    const { files, pieceLength, totalLength, pieceCount, indices, hashes, readRunBytes, wantMismatch, maxBytesPerSec } = job;
     const lastLen = totalLength - pieceLength * (pieceCount - 1);
     const lenAt = (i) => (i === pieceCount - 1) && lastLen || pieceLength;
     const piecesPerRun = Math.max(1, Math.floor(readRunBytes / pieceLength));
@@ -107,6 +110,7 @@ async function verify(id, job) {
     const mismatches = [];
     let piecesRead = 0;
     let lastPost = Date.now();
+    const startTime = Date.now();
     let pos = 0;
     let prefetch = runs.length && readRun(runs[0]) || undefined;
     for (let r = 0; r < runs.length; r++) {
@@ -127,6 +131,13 @@ async function verify(id, job) {
         }
         pos += run.length;
         piecesRead += run.length;
+        // Pace the disk reads: sleep until enough real time has passed for the
+        // bytes read so far to stay under the cap. The one-run prefetch means a
+        // sleep here also backpressures the next read.
+        if (maxBytesPerSec > 0) {
+            const wait = (bytesRead / maxBytesPerSec) * 1000 - (Date.now() - startTime);
+            if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+        }
         const now = Date.now();
         if (now - lastPost >= 250) {
             lastPost = now;
@@ -177,6 +188,9 @@ export class VerifyPool {
     private readonly queue: { id: number; job: VerifyJob; pending: Pending }[] = [];
     private readonly pending = new Map<number, Pending>();
     private nextId = 0;
+    // Per-worker disk-read cap in bytes per second (0 = unlimited), injected into
+    // every dispatched job. Set from the global verify scan limit.
+    private maxBytesPerSec = 0;
 
     constructor(size = Math.max(1, os.cpus().length - 1)) {
         for (let i = 0; i < size; i++) {
@@ -207,9 +221,14 @@ export class VerifyPool {
         entry.resolve({ verified: msg.verified, mismatches: msg.mismatches, bytesRead: msg.bytesRead });
     }
 
+    setMaxBytesPerSec(maxBytesPerSec: number): void {
+        this.maxBytesPerSec = Math.max(0, maxBytesPerSec);
+    }
+
     private dispatch(worker: Worker, id: number, job: VerifyJob, pending: Pending) {
         if (this.pending.size === 0) for (const w of this.workers) w.ref();
         this.pending.set(id, pending);
+        job.maxBytesPerSec = this.maxBytesPerSec;
         worker.postMessage({ id, job }, [job.indices.buffer as ArrayBuffer, job.hashes.buffer as ArrayBuffer]);
     }
 

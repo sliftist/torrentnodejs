@@ -59,6 +59,9 @@ export interface SchedulerSettings {
     // How many torrents run their initial disk-verify (scan) at once, so adding
     // a big batch doesn't hammer the disk all at once.
     concurrentScans: number;
+    // Global cap on disk read throughput during verify/scan, in megabytes per
+    // second (0 = unlimited). Shared across all concurrent scans.
+    verifyScanMbps: number;
 }
 
 export interface Config {
@@ -91,6 +94,7 @@ export const DEFAULT_SCHEDULER: SchedulerSettings = {
     downloadSkipLimitMs: 5 * 60 * 1000,
     watchIntervalMs: 3000,
     concurrentScans: 8,
+    verifyScanMbps: 5000,
 };
 
 export function configPath(dir = process.cwd()): string {

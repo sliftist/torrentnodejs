@@ -12,6 +12,7 @@ import { ChokeManager } from "../chokeManager";
 import { ConnectionBudget } from "../connectionBudget";
 import { DialStats } from "../dialStats";
 import { Storage, diskIO } from "../storage";
+import { sharedVerifyPool } from "../verifyPool";
 import { yieldIfBlocked } from "../cooperativeYield";
 import { SchedulerSettings } from "./config";
 
@@ -301,6 +302,17 @@ export class TorrentManager extends EventEmitter {
         this.stateDir = opts.stateDir ?? process.cwd();
         this.listenPort = opts.listenPort;
         this.mode = opts.mode ?? "full";
+        this.applyVerifyScanLimit();
+    }
+
+    // The global verify scan cap (MB/s) is shared across the concurrent scans the
+    // scheduler allows, so each worker self-limits to its slice and the aggregate
+    // disk read stays under the cap when fully loaded. 0 means unlimited.
+    private applyVerifyScanLimit(): void {
+        const perWorker = this.scheduler.verifyScanMbps > 0
+            && (this.scheduler.verifyScanMbps * 1_000_000) / Math.max(1, this.scheduler.concurrentScans)
+            || 0;
+        sharedVerifyPool().setMaxBytesPerSec(perWorker);
     }
 
     get runMode(): RunMode { return this.mode; }
@@ -323,6 +335,7 @@ export class TorrentManager extends EventEmitter {
         });
         // Owns both download and upload limiter rates (shared + priority buckets).
         this.applyBandwidthSplit();
+        this.applyVerifyScanLimit();
         this.emit("update");
     }
 

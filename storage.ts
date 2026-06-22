@@ -356,6 +356,8 @@ export class Storage {
                     hashes,
                     readRunBytes: READ_RUN_BYTES,
                     wantMismatch: Boolean(config?.onMismatch),
+                    // Injected by the pool at dispatch from the global scan cap.
+                    maxBytesPerSec: 0,
                 },
                 (progress) => {
                     diskIO.bytesRead += progress.bytesRead - reportedBytes;
