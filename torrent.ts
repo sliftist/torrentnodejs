@@ -245,6 +245,13 @@ export class Torrent extends EventEmitter {
         for (const s of this.tracker.trackerStats) if (s.status === "ok") n++;
         return n;
     }
+    // Epoch ms of the most recent successful announce across all trackers
+    // (0 = haven't announced yet).
+    get lastAnnounceMs(): number {
+        let latest = 0;
+        for (const s of this.tracker.trackerStats) if (s.lastAnnounceMs && s.lastAnnounceMs > latest) latest = s.lastAnnounceMs;
+        return latest;
+    }
 
     // Richer per-peer info for the detail view.
     get peerDetails(): { ip: string; port: number; direction: "in" | "out"; peerChoking: boolean; amChoking: boolean; inflight: number }[] {

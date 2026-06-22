@@ -21,6 +21,7 @@
         "ink-text-input": "^4.0.3",
         "react": "^17.0.2",
         "selfsigned": "^5.5.0",
+        "socket-function": "^1.1.43",
         "typenode": "*",
         "wireguardnodejs": "git+ssh://git@github.com/sliftist/wireguardnodejs.git#main",
         "yaml": "^2.4.0"

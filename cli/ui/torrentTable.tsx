@@ -1,7 +1,8 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { TorrentSection, TorrentView } from "../torrentManager";
-import { formatRate, formatPercent, formatEta, formatNumber, formatBytes, formatDateTime, truncate } from "./format";
+import { formatRate, formatPercent, formatEta, formatNumber, formatBytes, truncate } from "./format";
+import { formatTime } from "socket-function/src/formatting/format";
 
 const STATE_COLOR: Record<string, string> = {
     queued: "gray",
@@ -50,7 +51,7 @@ export function TorrentTable(props: {
     verifyEtaMs: number;
 }) {
     const { sections, selectedHash, width, height, verifyEtaMs } = props;
-    const nameWidth = Math.max(10, width - 120);
+    const nameWidth = Math.max(10, width - 106);
     const total = sections.reduce((a, s) => a + s.items.length, 0);
 
     if (total === 0) {
@@ -99,8 +100,7 @@ export function TorrentTable(props: {
                 <Box width={7}><Text dimColor bold>dn/up</Text></Box>
                 <Box width={8}><Text dimColor bold>eta</Text></Box>
                 <Box width={6}><Text dimColor bold>ratio</Text></Box>
-                <Box width={12}><Text dimColor bold>started</Text></Box>
-                <Box width={12}><Text dimColor bold>finished</Text></Box>
+                <Box width={10}><Text dimColor bold>announce</Text></Box>
                 <Box width={5}><Text dimColor bold>trk</Text></Box>
                 <Text dimColor bold>range chunks</Text>
             </Box>
@@ -144,8 +144,7 @@ export function TorrentTable(props: {
                         <Box width={7}><Text>{`${v.peersUnchokingUs}↓/${v.peersWeUnchoked}↑`}</Text></Box>
                         <Box width={8}><Text>{v.verifyEtaMs > 0 && <Text color="blue">{formatEta(v.verifyEtaMs / 1000)}</Text> || (v.progress >= 1 && "—" || formatEta(v.etaSeconds))}</Text></Box>
                         <Box width={6}><Text>{v.ratio.toFixed(2)}</Text></Box>
-                        <Box width={12}><Text dimColor>{formatDateTime(v.startedAtMs)}</Text></Box>
-                        <Box width={12}><Text dimColor>{formatDateTime(v.finishedAtMs)}</Text></Box>
+                        <Box width={10}><Text dimColor>{v.lastAnnounceMs > 0 && formatTime(Date.now() - v.lastAnnounceMs) || "—"}</Text></Box>
                         <Box width={5}><Text>{`${v.trackersResponding}/${v.trackersTotal}`}</Text></Box>
                         <Text color="yellow">{v.rangeChunksRequested > 0 && `${v.rangeChunksReturned}/${v.rangeChunksRequested}` || "—"}</Text>
                     </Box>

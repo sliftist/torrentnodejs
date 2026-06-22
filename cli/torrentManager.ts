@@ -73,6 +73,8 @@ export interface TorrentView {
     // Estimated finish: latest modified time across the output files. 0 = unknown.
     startedAtMs: number;
     finishedAtMs: number;
+    // Epoch ms of the most recent successful tracker announce (0 = none yet).
+    lastAnnounceMs: number;
     // True when the torrent is currently prioritized (manually or because a file
     // of it is being streamed over HTTP). `rangeOutstanding`/`rangeFinished`
     // count whole HTTP Range requests the browser made (streaming now vs. done).
@@ -1014,6 +1016,7 @@ export class TorrentManager extends EventEmitter {
             pieceCount: m.meta.pieceHashes.length,
             startedAtMs: m.startedAtMs,
             finishedAtMs: m.finishedAtMs,
+            lastAnnounceMs: t?.lastAnnounceMs ?? 0,
             prioritized: this.prioritized.has(m.infoHash),
             rangeOutstanding: this.rangeStats.get(m.infoHash)?.outstanding ?? 0,
             rangeFinished: this.rangeStats.get(m.infoHash)?.finished ?? 0,
