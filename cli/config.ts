@@ -56,6 +56,9 @@ export interface SchedulerSettings {
     downloadSkipLimitMs: number;
     // How often the source folders are rescanned for .torrent files (ms).
     watchIntervalMs: number;
+    // How many torrents run their initial disk-verify (scan) at once, so adding
+    // a big batch doesn't hammer the disk all at once.
+    concurrentScans: number;
 }
 
 export interface Config {
@@ -87,6 +90,7 @@ export const DEFAULT_SCHEDULER: SchedulerSettings = {
     downloadMbps: 80,
     downloadSkipLimitMs: 5 * 60 * 1000,
     watchIntervalMs: 3000,
+    concurrentScans: 8,
 };
 
 export function configPath(dir = process.cwd()): string {

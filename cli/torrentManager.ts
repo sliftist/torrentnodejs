@@ -17,9 +17,6 @@ import { SchedulerSettings } from "./config";
 
 const STATE_FILENAME = "bittorrent.state.json";
 const RATE_ALPHA = 0.35; // EMA smoothing for rates
-// Cap on torrents whose initial disk-verify is in flight at once, so adding a
-// big batch doesn't hammer the disk all at once.
-const MAX_CONCURRENT_STARTS = 8;
 // A complete torrent counts as "seeding actively" if it has uploaded within
 // this window; otherwise it's idle (no one has downloaded recently).
 const SEED_ACTIVE_WINDOW_MS = 60 * 1000;
@@ -1128,7 +1125,7 @@ export class TorrentManager extends EventEmitter {
             })
             .sort((a, b) => a.queueOrder - b.queueOrder);
         for (const m of toStart) {
-            if (inFlight >= MAX_CONCURRENT_STARTS) break;
+            if (inFlight >= this.scheduler.concurrentScans) break;
             void this.startTorrent(m);
             inFlight++;
         }
