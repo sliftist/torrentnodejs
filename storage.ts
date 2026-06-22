@@ -132,8 +132,26 @@ export class Storage {
         // present. Done with bounded concurrency: a torrent with many files on a
         // slow disk would otherwise spend many seconds in serial stat() calls
         // before verification could even begin.
+        // A file can only exist if its containing folder does, so we stat the
+        // directory chain first (cached, recursing toward the root). A torrent
+        // whose folders aren't on disk yet then skips every per-file stat — one
+        // cheap miss per missing folder covers all the files inside it.
+        const dirCache = new Map<string, Promise<boolean>>();
+        const dirExists = (dir: string): Promise<boolean> => {
+            const cached = dirCache.get(dir);
+            if (cached) return cached;
+            const compute = (async () => {
+                const parent = path.dirname(dir);
+                if (parent !== dir && !await dirExists(parent)) return false;
+                return await stat(dir).then((s) => s.isDirectory()).catch(() => false);
+            })();
+            dirCache.set(dir, compute);
+            return compute;
+        };
+        const statIfDir = async (filePath: string) =>
+            await dirExists(path.dirname(filePath)) && await stat(filePath).catch(() => undefined) || undefined;
         const statPlan = async (plan: FilePlan) => {
-            const finalStat = await stat(plan.finalPath).catch(() => undefined);
+            const finalStat = await statIfDir(plan.finalPath);
             if (finalStat) {
                 plan.finalSize = finalStat.size;
                 plan.finalMtimeMs = finalStat.mtimeMs;
@@ -146,7 +164,7 @@ export class Storage {
             }
             // Pick up a partial temp file left by a previous run so a resumed
             // download verifies its existing progress.
-            const tempStat = await stat(plan.tempPath).catch(() => undefined);
+            const tempStat = await statIfDir(plan.tempPath);
             if (tempStat) {
                 plan.tempSize = tempStat.size;
                 plan.tempMtimeMs = tempStat.mtimeMs;
