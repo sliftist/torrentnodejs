@@ -105,12 +105,13 @@ export function TorrentTable(props: {
             </Box>
             {rows.map((row, idx) => {
                 if (row.kind === "title") {
+                    const groupBytes = row.section.items.reduce((a, v) => a + v.sizeBytes, 0);
                     return (
                         <Box key={`t-${row.section.key}`}>
                             <Text bold color={SECTION_COLOR[row.section.key] || "white"}>
                                 {row.section.title}
                             </Text>
-                            <Text dimColor>{`  (${row.section.items.length})`}</Text>
+                            <Text dimColor>{`  (${row.section.items.length} · ${formatBytes(groupBytes)})`}</Text>
                         </Box>
                     );
                 }
