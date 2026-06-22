@@ -20,6 +20,13 @@ interface FilePlan {
     // salvage a partial or mismatched output file rather than reporting 0%.
     existingFinalSize?: number;
     existingFinalMtimeMs?: number;
+    // Size + mtime of whatever file physically backs "existing" reads — the final
+    // output file when present, else the allocated temp copy. Keys the
+    // verified-piece cache so an unchanged file (final OR partial/temp) is never
+    // re-hashed; writing new blocks bumps the temp file's mtime and invalidates
+    // it, which is exactly when a re-hash is warranted.
+    existingSize?: number;
+    existingMtimeMs?: number;
 }
 
 // On-disk record of a previous verification, stored alongside the output files.
@@ -107,14 +114,35 @@ export class Storage {
                 plan.existingFinalSize = finalStat.size;
                 plan.existingFinalMtimeMs = finalStat.mtimeMs;
             }
-            if (!allocated) continue;
+            if (!allocated) {
+                if (finalStat) {
+                    plan.existingSize = finalStat.size;
+                    plan.existingMtimeMs = finalStat.mtimeMs;
+                }
+                continue;
+            }
             // Already complete from a previous run? Read it straight from its
             // final spot; no temp file needed.
             if (finalStat && finalStat.size === f.length) {
                 plan.finalized = true;
+                plan.existingSize = finalStat.size;
+                plan.existingMtimeMs = finalStat.mtimeMs;
                 continue;
             }
             await this.allocate(tempPath, f.length);
+            // An existing (mis-sized) output file still backs reads for salvage;
+            // otherwise the temp copy we just ensured does. Record whichever one
+            // so a repeat scan can trust it from the cache without re-hashing.
+            if (finalStat) {
+                plan.existingSize = finalStat.size;
+                plan.existingMtimeMs = finalStat.mtimeMs;
+            } else {
+                const tempStat = await stat(tempPath).catch(() => undefined);
+                if (tempStat) {
+                    plan.existingSize = tempStat.size;
+                    plan.existingMtimeMs = tempStat.mtimeMs;
+                }
+            }
         }
     }
 
@@ -255,9 +283,9 @@ export class Storage {
     private pieceUnchanged(index: number, cached: CheckedCache): boolean {
         for (const plan of this.plansForPiece(index)) {
             if (plan.file.length === 0) continue;
-            if (plan.existingFinalSize === undefined || plan.existingFinalMtimeMs === undefined) return false;
+            if (plan.existingSize === undefined || plan.existingMtimeMs === undefined) return false;
             const c = cached.files[plan.file.path.join("/")];
-            if (!c || c.size !== plan.existingFinalSize || c.mtimeMs !== plan.existingFinalMtimeMs) return false;
+            if (!c || c.size !== plan.existingSize || c.mtimeMs !== plan.existingMtimeMs) return false;
         }
         return true;
     }
@@ -267,6 +295,20 @@ export class Storage {
     // the UI should surface rather than reporting a plain empty download.
     get hasMismatchedOutput(): boolean {
         return this.filePlans.some((p) => p.existingFinalSize !== undefined && !p.finalized);
+    }
+
+    // Whether verification is reading the user's finished output files
+    // ("output") or the in-progress temp copies ("temp"). Drives the UI's
+    // "verify out" vs "verify tmp" distinction. "output" wins if any file is
+    // backed by a real output file (complete or salvageable); only a torrent
+    // whose data lives solely in temp copies reports "temp".
+    get verifyTarget(): "output" | "temp" {
+        for (const plan of this.filePlans) {
+            if (plan.file.length === 0) continue;
+            const src = this.existingSource(plan);
+            if (src && src.path === plan.finalPath) return "output";
+        }
+        return "temp";
     }
 
     private async loadCheckedCache(): Promise<CheckedCache | undefined> {
@@ -289,8 +331,8 @@ export class Storage {
         const files: Record<string, { size: number; mtimeMs: number }> = {};
         for (const plan of this.filePlans) {
             if (!touched.has(plan.file)) continue;
-            if (plan.existingFinalSize === undefined || plan.existingFinalMtimeMs === undefined) continue;
-            files[plan.file.path.join("/")] = { size: plan.existingFinalSize, mtimeMs: plan.existingFinalMtimeMs };
+            if (plan.existingSize === undefined || plan.existingMtimeMs === undefined) continue;
+            files[plan.file.path.join("/")] = { size: plan.existingSize, mtimeMs: plan.existingMtimeMs };
         }
         const cache: CheckedCache = {
             version: CHECKED_CACHE_VERSION,

@@ -48,6 +48,15 @@ const LIMIT_FIELDS: { key: keyof SchedulerSettings; label: string }[] = [
 const RENDER_THROTTLE_MS = 70;
 const MENU_WIDTH = 36;
 
+// Fixed vertical chrome around the scrollable body, so the table is told
+// exactly how many lines it may use. Header = 6 content rows + 2 border lines;
+// Footer = 3 content rows (hint, sources, output) + 2 border lines; plus the
+// body's own marginTop. Keep these in sync with the Header/Footer components.
+const HEADER_HEIGHT = 8;
+const FOOTER_HEIGHT = 5;
+const BODY_MARGIN_TOP = 1;
+const CHROME_HEIGHT = HEADER_HEIGHT + FOOTER_HEIGHT + BODY_MARGIN_TOP;
+
 export function App(props: AppProps) {
     const { manager, watcher, localIP, onAddSource, onSchedulerChange, webUrl, webPassword } = props;
     const { exit } = useApp();
@@ -284,7 +293,7 @@ export function App(props: AppProps) {
     });
 
     const width = dims.cols;
-    const bodyHeight = Math.max(4, dims.rows - 10);
+    const bodyHeight = Math.max(4, dims.rows - CHROME_HEIGHT);
 
     let body: React.ReactNode;
     if (view === "detail" && detail && detailViewModel) {
@@ -294,7 +303,7 @@ export function App(props: AppProps) {
     }
 
     return (
-        <Box flexDirection="column" width={width}>
+        <Box flexDirection="column" width={width} height={dims.rows}>
             <Header agg={manager.aggregate()} localIP={localIP} width={width} mode={manager.runMode} />
             <Box flexDirection="column" flexGrow={1} marginTop={1}>
                 {body}

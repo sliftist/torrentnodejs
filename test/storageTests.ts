@@ -160,6 +160,64 @@ export async function runStorageTests() {
         await rm(cacheDir, { recursive: true, force: true });
     }
 
+    // Temp-file cache: a partial download lives only in the temp copy (no output
+    // file yet), and a scan must trust that copy's verified pieces from the cache
+    // instead of re-hashing it every startup. Proven the same way as the output
+    // cache — corrupt the temp bytes while preserving size+mtime and the cache
+    // hit still reports the pieces valid; bumping the mtime forces a real re-hash.
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "bt-storage-temp-"));
+    try {
+        const all = meta.pieceHashes.map((_, i) => i);
+        const infoHashHex = meta.infoHash.toString("hex");
+        const tempPath = path.join(tempDir, ".bittorrent-incomplete", infoHashHex, "blob.bin");
+
+        // A prior session downloads every piece into the temp copy and exits
+        // without finalizing (no output file is produced).
+        const writer = new Storage(meta, tempDir, new Set(all));
+        await writer.open();
+        for (let i = 0; i < meta.pieceHashes.length; i++) {
+            const piece = data.subarray(i * pieceLength, Math.min((i + 1) * pieceLength, data.length));
+            await writer.writePiece(i, piece);
+        }
+        await writer.close();
+
+        // No output file ever appeared; the data is purely in the temp copy.
+        const noOutput = await stat(path.join(tempDir, "blob.bin")).catch(() => undefined);
+        assert.ok(!noOutput, "partial download leaves no output file");
+        const fixed = new Date(Math.floor(Date.now() / 1000) * 1000);
+        await utimes(tempPath, fixed, fixed);
+
+        // First scan hashes the temp copy and records its size+mtime in the cache.
+        const ts1 = new Storage(meta, tempDir, new Set(all));
+        await ts1.open();
+        assert.strictEqual((await ts1.verifyExistingPieces()).popcount(), meta.pieceHashes.length, "temp copy fully verifies");
+        await ts1.close();
+
+        // Corrupt the temp copy in place but keep its size+mtime.
+        const th = await fsOpen(tempPath, "r+");
+        await th.write(Buffer.alloc(200, 0xff), 0, 200, 0);
+        await th.close();
+        await utimes(tempPath, fixed, fixed);
+
+        const ts2 = new Storage(meta, tempDir, new Set(all));
+        await ts2.open();
+        const cached = await ts2.verifyExistingPieces();
+        assert.strictEqual(cached.popcount(), meta.pieceHashes.length, "unchanged temp size+mtime → cache hit, no re-hash");
+        await ts2.close();
+
+        // Bump the temp copy's mtime: the cache is stale and a re-hash runs.
+        const later = new Date(fixed.getTime() + 5000);
+        await utimes(tempPath, later, later);
+        const ts3 = new Storage(meta, tempDir, new Set(all));
+        await ts3.open();
+        const rehashed = await ts3.verifyExistingPieces();
+        assert.ok(!rehashed.get(0), "changed temp mtime invalidates the cache and the corrupt piece is caught");
+        assert.ok(rehashed.get(1) && rehashed.get(2), "intact temp pieces still verify after re-hash");
+        await ts3.close();
+    } finally {
+        await rm(tempDir, { recursive: true, force: true });
+    }
+
     // Per-file cache granularity: when one file in a multi-file torrent changes,
     // only that file's pieces re-hash; an unchanged file's pieces stay trusted
     // from the cache (proven by secretly corrupting the unchanged file's bytes

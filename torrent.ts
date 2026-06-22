@@ -226,6 +226,7 @@ export class Torrent extends EventEmitter {
     }
 
     get hasMismatchedOutput(): boolean { return this.storage.hasMismatchedOutput; }
+    get verifyTarget(): "output" | "temp" { return this.storage.verifyTarget; }
     get trackerStats() { return this.tracker.trackerStats; }
     get pieceStates() { return this.pieceManager.pieceStates(); }
     get pieceCounts() { return this.pieceManager.pieceCounts; }

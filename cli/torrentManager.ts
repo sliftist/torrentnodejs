@@ -29,7 +29,8 @@ const CHOKE_INTERVAL_MS = 10 * 1000;
 export type TorrentState =
     | "queued"
     | "unverified"   // on-disk data not hashed yet; waiting its turn to be scanned
-    | "verifying"    // actively hashing on-disk data right now
+    | "verifyOut"    // actively hashing the finished output files right now
+    | "verifyTmp"    // actively hashing the in-progress temp copies right now
     | "checked"      // scan-mode: drive verified, incomplete
     | "corrupted"    // output files on disk don't fully match; partial/wrong data present
     | "ready"        // scrape-mode: swarm stats gathered, no transfers
@@ -728,7 +729,7 @@ export class TorrentManager extends EventEmitter {
         // Until the on-disk data has been hashed, the torrent is unusable:
         // "verifying" while a scan is actively running, "unverified" while it
         // waits its turn.
-        if (m.torrent && !m.started) return "verifying";
+        if (m.torrent && !m.started) return m.torrent.verifyTarget === "temp" && "verifyTmp" || "verifyOut";
         if (!m.verified) return "unverified";
         if (!m.torrent) return "queued";
         const complete = this.isComplete(m);

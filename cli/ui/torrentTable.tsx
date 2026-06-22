@@ -6,7 +6,8 @@ import { formatRate, formatPercent, formatEta, formatNumber, formatBytes, format
 const STATE_COLOR: Record<string, string> = {
     queued: "gray",
     unverified: "gray",
-    verifying: "blue",
+    verifyOut: "blue",
+    verifyTmp: "blue",
     checked: "blue",
     corrupted: "red",
     ready: "magenta",
@@ -22,6 +23,8 @@ const STATE_COLOR: Record<string, string> = {
 const STATE_LABEL: Record<string, string> = {
     downloading: "down",
     corrupted: "corrupt",
+    verifyOut: "verify out",
+    verifyTmp: "verify tmp",
 };
 
 const SECTION_COLOR: Record<string, string> = {
@@ -53,19 +56,28 @@ export function TorrentTable(props: {
         return <Text dimColor>No torrents. Drop .torrent files into a watched folder, or paste a folder path below.</Text>;
     }
 
-    // 1 line for the column header; the rest is split evenly across the four
-    // sections so the content above the list always stays on screen.
-    const bodyLines = Math.max(sections.length, height - 1);
-    const base = Math.floor(bodyLines / sections.length);
-    const extra = bodyLines % sections.length;
+    // Only non-empty sections take up space. One line goes to the column
+    // header, one to each visible section's title, and the remaining budget is
+    // handed out to item rows by water-filling — one line at a time, round-robin
+    // across sections that still have unshown items — so the table fills the
+    // available height instead of leaving blank gaps under sparse sections.
+    const visibleSections = sections.filter((s) => s.items.length > 0);
+    const allocations = visibleSections.map(() => 0);
+    let itemBudget = Math.max(0, height - 1 - visibleSections.length);
+    let progressing = true;
+    while (itemBudget > 0 && progressing) {
+        progressing = false;
+        for (let i = 0; i < visibleSections.length && itemBudget > 0; i++) {
+            if (allocations[i] >= visibleSections[i].items.length) continue;
+            allocations[i]++;
+            itemBudget--;
+            progressing = true;
+        }
+    }
 
     const rows: Row[] = [];
-    sections.forEach((section, i) => {
-        let sectionLines = base;
-        if (i < extra) sectionLines += 1;
-        if (sectionLines < 1) return;
-        const itemLines = sectionLines - 1; // one line for the title
-        const window = pickWindow(section.items, itemLines, selectedHash);
+    visibleSections.forEach((section, i) => {
+        const window = pickWindow(section.items, allocations[i], selectedHash);
         rows.push({ kind: "title", section, shown: window.items.length });
         for (const v of window.items) rows.push({ kind: "item", view: v });
         if (window.hiddenAfter > 0) rows.push({ kind: "more", count: window.hiddenAfter });
