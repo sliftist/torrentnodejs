@@ -91,7 +91,7 @@ export function TorrentTable(props: {
                 <Box width={11}><Text dimColor bold>state</Text></Box>
                 <Box width={7}><Text dimColor bold>prog</Text></Box>
                 <Box width={9}><Text dimColor bold>size</Text></Box>
-                <Box width={7}><Text dimColor bold>chunks</Text></Box>
+                <Box width={7}><Text dimColor bold>pieces</Text></Box>
                 <Box width={9}><Text dimColor bold>↓ rate</Text></Box>
                 <Box width={9}><Text dimColor bold>↑ rate</Text></Box>
                 <Box width={15}><Text dimColor bold>conn/seed/all</Text></Box>
@@ -100,7 +100,8 @@ export function TorrentTable(props: {
                 <Box width={6}><Text dimColor bold>ratio</Text></Box>
                 <Box width={12}><Text dimColor bold>started</Text></Box>
                 <Box width={12}><Text dimColor bold>finished</Text></Box>
-                <Text dimColor bold>trk</Text>
+                <Box width={5}><Text dimColor bold>trk</Text></Box>
+                <Text dimColor bold>chunks↺</Text>
             </Box>
             {rows.map((row, idx) => {
                 if (row.kind === "title") {
@@ -142,7 +143,8 @@ export function TorrentTable(props: {
                         <Box width={6}><Text>{v.ratio.toFixed(2)}</Text></Box>
                         <Box width={12}><Text dimColor>{formatDateTime(v.startedAtMs)}</Text></Box>
                         <Box width={12}><Text dimColor>{formatDateTime(v.finishedAtMs)}</Text></Box>
-                        <Text>{`${v.trackersResponding}/${v.trackersTotal}`}</Text>
+                        <Box width={5}><Text>{`${v.trackersResponding}/${v.trackersTotal}`}</Text></Box>
+                        <Text color="yellow">{v.rangeChunksRequested > 0 && `${v.rangeChunksReturned}/${v.rangeChunksRequested}` || "—"}</Text>
                     </Box>
                 );
             })}
