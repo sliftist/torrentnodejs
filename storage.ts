@@ -103,6 +103,7 @@ async function writeFully(handle: FileHandle, buffer: Buffer, offset: number, le
 export class Storage {
     private filePlans: FilePlan[] = [];
     private opened = false;
+    private scanned = false;
 
     constructor(
         private readonly meta: TorrentMeta,
@@ -112,46 +113,46 @@ export class Storage {
         private readonly touchedPieces?: Set<number>,
     ) {}
 
-    // Learn what's already on disk; allocate nothing. Only stats are done here —
-    // a couple per file — so opening a multi-terabyte torrent is instant whether
-    // or not its data exists. Temp files are created lazily on the first write
-    // (see writeAt), so a scan, or a torrent we haven't begun downloading, never
-    // reserves a byte of space.
+    // Build the file plan (which torrent file maps to which output/temp path)
+    // and nothing else: no disk I/O, no stats, no allocation. Cheap and always
+    // safe to call, even for a multi-terabyte torrent whose data isn't present.
+    // Learning what's on disk is scanDiskState(); creating temp files is the
+    // lazy first-write in writeAt().
     async open(): Promise<void> {
         if (this.opened) return;
         this.opened = true;
-        const touchedFiles = this.computeTouchedFiles();
         const tempBase = this.incompleteDir();
+        const touchedFiles = this.computeTouchedFiles();
         for (const f of this.meta.files) {
             const finalPath = path.join(this.saveDir, ...f.path);
             const tempPath = this.joinSameFlavor(tempBase, f.path);
             const allocated = touchedFiles.has(f);
             this.filePlans.push({ file: f, finalPath, tempPath, allocated, finalized: false });
         }
-        // Stat every file's on-disk state up front so verify knows what is
-        // present. Done with bounded concurrency: a torrent with many files on a
-        // slow disk would otherwise spend many seconds in serial stat() calls
-        // before verification could even begin.
-        // A file can only exist if its containing folder does, so we stat the
-        // directory chain first (cached, recursing toward the root). A torrent
-        // whose folders aren't on disk yet then skips every per-file stat — one
-        // cheap miss per missing folder covers all the files inside it.
-        const dirCache = new Map<string, Promise<boolean>>();
-        const dirExists = (dir: string): Promise<boolean> => {
-            const cached = dirCache.get(dir);
-            if (cached) return cached;
-            const compute = (async () => {
-                const parent = path.dirname(dir);
-                if (parent !== dir && !await dirExists(parent)) return false;
-                return await stat(dir).then((s) => s.isDirectory()).catch(() => false);
-            })();
-            dirCache.set(dir, compute);
-            return compute;
-        };
-        const statIfDir = async (filePath: string) =>
-            await dirExists(path.dirname(filePath)) && await stat(filePath).catch(() => undefined) || undefined;
+    }
+
+    // True if any of this torrent's bytes are already on disk: a finished (or
+    // partial) output under the save dir, or an in-progress temp dir from an
+    // earlier run. Pure existence primitive — storage answers "do these paths
+    // exist?" and the caller decides what to do with the answer (e.g. skip the
+    // verify scan for a torrent that hasn't been downloaded at all).
+    async hasStoredData(): Promise<boolean> {
+        const contentRoot = path.join(this.saveDir, this.meta.name);
+        if (await stat(contentRoot).then(() => true).catch(() => false)) return true;
+        return await stat(this.incompleteDir()).then(() => true).catch(() => false);
+    }
+
+    // Stat every file to record what's on disk: the size/mtime of any finished
+    // output file (so we can verify or salvage it) and of any partial temp file
+    // left by a previous run (so a resumed download picks up its progress).
+    // Allocates nothing. Stats run with bounded concurrency so a many-file
+    // torrent doesn't crawl through them one await at a time.
+    async scanDiskState(): Promise<void> {
+        if (!this.opened) throw new Error("Storage not open");
+        if (this.scanned) return;
+        this.scanned = true;
         const statPlan = async (plan: FilePlan) => {
-            const finalStat = await statIfDir(plan.finalPath);
+            const finalStat = await stat(plan.finalPath).catch(() => undefined);
             if (finalStat) {
                 plan.finalSize = finalStat.size;
                 plan.finalMtimeMs = finalStat.mtimeMs;
@@ -164,7 +165,7 @@ export class Storage {
             }
             // Pick up a partial temp file left by a previous run so a resumed
             // download verifies its existing progress.
-            const tempStat = await statIfDir(plan.tempPath);
+            const tempStat = await stat(plan.tempPath).catch(() => undefined);
             if (tempStat) {
                 plan.tempSize = tempStat.size;
                 plan.tempMtimeMs = tempStat.mtimeMs;
@@ -180,6 +181,7 @@ export class Storage {
     async close(): Promise<void> {
         this.filePlans = [];
         this.opened = false;
+        this.scanned = false;
     }
 
     async writePiece(pieceIndex: number, data: Buffer): Promise<void> {
@@ -238,6 +240,9 @@ export class Storage {
         },
     ): Promise<Bitfield> {
         if (!this.opened) throw new Error("Storage not open");
+        // Verifying needs to know what's on disk; scanDiskState is idempotent, so
+        // callers that already scanned (e.g. the seed path) pay nothing.
+        await this.scanDiskState();
 
         const result = new Bitfield(this.meta.pieceHashes.length);
         const toCheck = candidates

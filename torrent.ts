@@ -6,6 +6,7 @@ import { PeerAddress } from "./trackerHttp";
 import { PeerConnection } from "./peerConnection";
 import { PieceManager, PieceSelection, BlockRequest, BLOCK_SIZE } from "./pieceManager";
 import { Storage } from "./storage";
+import { Bitfield } from "./bitfield";
 import { PeerListener, InboundPeer } from "./peerListener";
 import { RateLimiter } from "./rateLimiter";
 import { ChokeManager } from "./chokeManager";
@@ -68,6 +69,29 @@ interface PeerMeta {
     ip: string;
     port: number;
     direction: "in" | "out";
+}
+
+// The on-disk check step of the torrent workflow, shared by Torrent.start() and
+// the `check` script so both verify through exactly the same path. Deciding
+// whether there's anything worth scanning is the caller's job, not storage's:
+// if no bytes are on disk we return an empty bitfield without touching a single
+// file, which is what makes adding a not-yet-downloaded multi-terabyte torrent
+// instant. When data is present we stat the files and SHA-1-verify them.
+export async function checkTorrentOnDisk(config: {
+    storage: Storage;
+    pieceCount: number;
+    candidates?: Iterable<number>;
+    importToTemp?: boolean;
+    onProgress?: (info: { piecesRead: number; piecesToRead: number }) => void;
+    onMismatch?: (info: { index: number; computed: Buffer; expected: Buffer }) => void;
+}): Promise<Bitfield> {
+    await config.storage.open();
+    if (!await config.storage.hasStoredData()) return new Bitfield(config.pieceCount);
+    return config.storage.verifyExistingPieces(config.candidates, {
+        importToTemp: config.importToTemp,
+        onProgress: config.onProgress,
+        onMismatch: config.onMismatch,
+    });
 }
 
 // Events:
@@ -256,7 +280,7 @@ export class Torrent extends EventEmitter {
 
         const mode = this.options.mode ?? "full";
 
-        // Stamp the verify start before open() so the timer covers the whole
+        // Stamp the verify start before the check so the timer covers the whole
         // disk-bound phase, including learning what's on disk.
         if (this.options.verifyExisting && !this.options.seedExisting) {
             this.verifyStartedAtField = Date.now();
@@ -264,12 +288,18 @@ export class Torrent extends EventEmitter {
         await this.storage.open();
 
         if (this.options.seedExisting) {
+            // Seeding trusts the data is already on disk; learn its layout so
+            // reads for upload find the finished files.
+            await this.storage.scanDiskState();
             this.pieceManager.markAllSelectedDone();
         } else if (this.options.verifyExisting) {
             // Only a real download (full mode) seeds the temp file from salvaged
             // output; a scan just reports what's actually on disk.
             this.verifyProgressField = { piecesRead: 0, piecesToRead: 0 };
-            const have = await this.storage.verifyExistingPieces(this.pieceManager.selected, {
+            const have = await checkTorrentOnDisk({
+                storage: this.storage,
+                pieceCount: this.meta.pieceHashes.length,
+                candidates: this.pieceManager.selected,
                 importToTemp: mode === "full",
                 onProgress: (p) => { this.verifyProgressField = p; },
             });

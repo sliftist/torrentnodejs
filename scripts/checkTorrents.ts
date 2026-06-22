@@ -1,8 +1,9 @@
 import { readdir } from "fs/promises";
 import path from "path";
 import { loadConfig } from "../cli/config";
-import { parseTorrentFile, TorrentMeta, pieceLengthAt } from "../torrentFile";
+import { parseTorrentFile, TorrentMeta } from "../torrentFile";
 import { Storage } from "../storage";
+import { checkTorrentOnDisk } from "../torrent";
 
 // Locates the file a given piece starts in and where the piece falls within
 // that file's own run of chunks, so a mismatch can be reported as
@@ -69,26 +70,28 @@ async function main() {
     for (const { meta } of matched) {
         const total = meta.pieceHashes.length;
         console.log(`=== ${meta.name}  (${total} chunks, ${meta.files.length} file(s)) ===`);
-        // Empty touched-pieces set: verify reads whatever is on disk without
-        // allocating any temp files (this is a read-only check).
+        // This script must NOT special-case anything: it runs the exact same
+        // on-disk check the app uses (checkTorrentOnDisk), only swapping in its
+        // own onMismatch reporting. Re-implementing the verify logic here would
+        // defeat the point of the script — it has to exercise the real workflow.
+        // Empty touched-pieces set keeps it read-only: no temp files allocated.
         const storage = new Storage(meta, config.downloadDir, new Set());
-        await storage.open();
         let mismatched = 0;
-        const have = await storage.verifyExistingPieces(
-            meta.pieceHashes.map((_, i) => i),
-            {
-                onMismatch: ({ index, computed, expected }) => {
-                    mismatched++;
-                    const loc = locatePiece(meta, index);
-                    console.log(
-                        `  MISMATCH chunk ${loc.indexInFile}/${loc.chunksInFile} in ${loc.file} ` +
-                        `(global piece ${index}/${total})\n` +
-                        `    expected ${expected.toString("hex")}\n` +
-                        `    received ${computed.toString("hex")}`,
-                    );
-                },
+        const have = await checkTorrentOnDisk({
+            storage,
+            pieceCount: total,
+            candidates: meta.pieceHashes.map((_, i) => i),
+            onMismatch: ({ index, computed, expected }) => {
+                mismatched++;
+                const loc = locatePiece(meta, index);
+                console.log(
+                    `  MISMATCH chunk ${loc.indexInFile}/${loc.chunksInFile} in ${loc.file} ` +
+                    `(global piece ${index}/${total})\n` +
+                    `    expected ${expected.toString("hex")}\n` +
+                    `    received ${computed.toString("hex")}`,
+                );
             },
-        );
+        });
         await storage.close();
         totalMismatched += mismatched;
         const ok = have.popcount();
