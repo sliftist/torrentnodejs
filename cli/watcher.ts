@@ -14,7 +14,7 @@ export interface SourceWatcherOptions {
 // mounts). Each tick it rescans every watched folder for *.torrent files and
 // diffs against the previous scan. Folders can be added/removed at runtime.
 export class SourceWatcher extends EventEmitter {
-    private readonly intervalMs: number;
+    private intervalMs: number;
     private readonly onAdd: (p: string) => void;
     private readonly onRemove: (p: string) => void;
     private folders = new Set<string>();
@@ -38,6 +38,15 @@ export class SourceWatcher extends EventEmitter {
     addFolder(folder: string): void {
         this.folders.add(path.resolve(folder));
         void this.scan();
+    }
+
+    setIntervalMs(intervalMs: number): void {
+        if (intervalMs <= 0 || intervalMs === this.intervalMs) return;
+        this.intervalMs = intervalMs;
+        if (!this.timer) return;
+        clearInterval(this.timer);
+        this.timer = setInterval(() => void this.scan(), this.intervalMs);
+        this.timer.unref?.();
     }
 
     get watchedFolders(): string[] {

@@ -41,6 +41,8 @@ const LIMIT_FIELDS: { key: keyof SchedulerSettings; label: string }[] = [
     { key: "connectionsPerTorrent", label: "Conns / torrent" },
     { key: "uploadSlots", label: "Upload slots" },
     { key: "optimisticUnchokeSlots", label: "Optimistic slots" },
+    { key: "downloadSkipLimitMs", label: "Skip stalled (ms)" },
+    { key: "watchIntervalMs", label: "Rescan folders (ms)" },
 ];
 
 // Cap UI redraws to ~14 fps. Coalesces bursts of manager "update" events into a

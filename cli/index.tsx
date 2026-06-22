@@ -11,7 +11,12 @@ import { WebCommandServer } from "./web/webServer";
 
 async function main() {
     const mode = parseRunMode(process.argv[2]);
-    const config: Config = (await configExists()) ? await loadConfig() : await runFirstRunSetup();
+    const existed = await configExists();
+    const config: Config = existed ? await loadConfig() : await runFirstRunSetup();
+    // Persist immediately so every limit — including ones left at their default
+    // or absent from an older config — is written out for hand-editing. (First
+    // run already saved; only re-save when loading an existing file.)
+    if (existed) await saveConfig(config);
 
     // Bring up the tunnel. This is the ONLY network path the client has — if it
     // fails, we exit rather than silently falling back to the host network.
@@ -67,6 +72,7 @@ async function main() {
 
     const onSchedulerChange = (changes: Partial<typeof config.scheduler>) => {
         manager.updateScheduler(changes);
+        if (changes.watchIntervalMs) watcher.setIntervalMs(changes.watchIntervalMs);
         config.scheduler = { ...config.scheduler, ...changes };
         void saveConfig(config);
     };
