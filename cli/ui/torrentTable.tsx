@@ -140,7 +140,7 @@ export function TorrentTable(props: {
                         <Box width={9}><Text color="green">{formatRate(v.upRate)}</Text></Box>
                         <Box width={15}><Text>{`${v.connectedPeers}/${formatNumber(v.seeders)}/${formatNumber(v.swarmPeers)}`}</Text></Box>
                         <Box width={7}><Text>{`${v.peersUnchokingUs}↓/${v.peersWeUnchoked}↑`}</Text></Box>
-                        <Box width={8}><Text>{v.progress >= 1 && "—" || formatEta(v.etaSeconds)}</Text></Box>
+                        <Box width={8}><Text>{v.verifyEtaMs > 0 && <Text color="blue">{formatEta(v.verifyEtaMs / 1000)}</Text> || (v.progress >= 1 && "—" || formatEta(v.etaSeconds))}</Text></Box>
                         <Box width={6}><Text>{v.ratio.toFixed(2)}</Text></Box>
                         <Box width={12}><Text dimColor>{formatDateTime(v.startedAtMs)}</Text></Box>
                         <Box width={12}><Text dimColor>{formatDateTime(v.finishedAtMs)}</Text></Box>

@@ -234,6 +234,7 @@ function statusEntry(v: TorrentView) {
         state: v.state,
         progress: `${(v.progress * 100).toFixed(1)}%`,
         scanProgress: v.verifyPiecesToRead > 0 && `${((v.verifyPiecesRead / v.verifyPiecesToRead) * 100).toFixed(1)}%` || undefined,
+        scanEtaSeconds: v.verifyEtaMs > 0 && Math.round(v.verifyEtaMs / 1000) || undefined,
         size: formatBytes(v.sizeBytes),
         downloaded: formatBytes(v.downloadedBytes),
         uploaded: formatBytes(v.uploadedBytes),

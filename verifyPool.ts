@@ -130,7 +130,7 @@ async function verify(id, job) {
         const now = Date.now();
         if (now - lastPost >= 250) {
             lastPost = now;
-            parentPort.postMessage({ id, type: "progress", piecesRead });
+            parentPort.postMessage({ id, type: "progress", piecesRead, bytesRead });
         }
     }
 
@@ -155,11 +155,16 @@ parentPort.on("message", async (msg) => {
 interface Pending {
     resolve: (result: VerifyResult) => void;
     reject: (error: Error) => void;
-    onProgress?: (piecesRead: number) => void;
+    onProgress?: (progress: VerifyProgress) => void;
+}
+
+export interface VerifyProgress {
+    piecesRead: number;
+    bytesRead: number;
 }
 
 type WorkerMessage =
-    | { id: number; type: "progress"; piecesRead: number }
+    | { id: number; type: "progress"; piecesRead: number; bytesRead: number }
     | { id: number; type: "done"; verified: Int32Array; mismatches: { index: number; computed: Buffer }[]; bytesRead: number }
     | { id: number; type: "error"; message: string };
 
@@ -186,7 +191,7 @@ export class VerifyPool {
     private onMessage(worker: Worker, msg: WorkerMessage) {
         const entry = this.pending.get(msg.id);
         if (msg.type === "progress") {
-            entry?.onProgress?.(msg.piecesRead);
+            entry?.onProgress?.({ piecesRead: msg.piecesRead, bytesRead: msg.bytesRead });
             return;
         }
         this.pending.delete(msg.id);
@@ -208,7 +213,7 @@ export class VerifyPool {
         worker.postMessage({ id, job }, [job.indices.buffer as ArrayBuffer, job.hashes.buffer as ArrayBuffer]);
     }
 
-    run(job: VerifyJob, onProgress?: (piecesRead: number) => void): Promise<VerifyResult> {
+    run(job: VerifyJob, onProgress?: (progress: VerifyProgress) => void): Promise<VerifyResult> {
         return new Promise<VerifyResult>((resolve, reject) => {
             const id = this.nextId++;
             const pending: Pending = { resolve, reject, onProgress };

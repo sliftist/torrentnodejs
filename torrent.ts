@@ -82,7 +82,7 @@ export async function checkTorrentOnDisk(config: {
     pieceCount: number;
     candidates?: Iterable<number>;
     importToTemp?: boolean;
-    onProgress?: (info: { piecesRead: number; piecesToRead: number }) => void;
+    onProgress?: (info: { piecesRead: number; piecesToRead: number; bytesRead: number; bytesToRead: number }) => void;
     onMismatch?: (info: { index: number; computed: Buffer; expected: Buffer }) => void;
 }): Promise<Bitfield> {
     await config.storage.open();
@@ -127,7 +127,7 @@ export class Torrent extends EventEmitter {
     // hashing have been hashed so far. undefined once verification is done (or
     // never ran), so the UI only shows scan progress while it's actually
     // happening.
-    private verifyProgressField: { piecesRead: number; piecesToRead: number } | undefined;
+    private verifyProgressField: { piecesRead: number; piecesToRead: number; bytesRead: number; bytesToRead: number } | undefined;
     // When the on-disk verification started, and when it finished (0 = still
     // running). Lets the UI show how long a torrent has been verifying so a
     // scan that's wedged on one torrent is obvious.
@@ -269,6 +269,18 @@ export class Torrent extends EventEmitter {
     get verifyProgress() { return this.verifyProgressField; }
     get verifyStartedAt() { return this.verifyStartedAtField; }
     get verifyFinishedAt() { return this.verifyFinishedAtField; }
+    // Estimated milliseconds until the disk-bound verify finishes, from the
+    // average read speed so far (bytes read / elapsed) applied to the bytes still
+    // to read. undefined until enough has been read to extrapolate.
+    get verifyEtaMs(): number | undefined {
+        const p = this.verifyProgressField;
+        if (!p || !this.verifyStartedAtField || p.bytesRead <= 0) return undefined;
+        const elapsed = Date.now() - this.verifyStartedAtField;
+        if (elapsed <= 0) return undefined;
+        const bytesPerMs = p.bytesRead / elapsed;
+        if (bytesPerMs <= 0) return undefined;
+        return Math.max(0, p.bytesToRead - p.bytesRead) / bytesPerMs;
+    }
     get trackerStats() { return this.tracker.trackerStats; }
     get pieceStates() { return this.pieceManager.pieceStates(); }
     get pieceCounts() { return this.pieceManager.pieceCounts; }
@@ -295,7 +307,7 @@ export class Torrent extends EventEmitter {
         } else if (this.options.verifyExisting) {
             // Only a real download (full mode) seeds the temp file from salvaged
             // output; a scan just reports what's actually on disk.
-            this.verifyProgressField = { piecesRead: 0, piecesToRead: 0 };
+            this.verifyProgressField = { piecesRead: 0, piecesToRead: 0, bytesRead: 0, bytesToRead: 0 };
             const have = await checkTorrentOnDisk({
                 storage: this.storage,
                 pieceCount: this.meta.pieceHashes.length,

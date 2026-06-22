@@ -71,7 +71,8 @@ function GeneralTab(props: { view: TorrentView; detail: TorrentDetail }) {
         const elapsedMs = (detail.verifyDoneAtMs || Date.now()) - detail.verifyStartedAtMs;
         rows.push(["Verify started", formatDateTime(detail.verifyStartedAtMs)]);
         const progress = detail.verifyPiecesToRead > 0 && ` · ${detail.verifyPiecesRead}/${detail.verifyPiecesToRead} chunks` || "";
-        rows.push([verifying && "Verifying for" || "Verified in", `${formatEta(elapsedMs / 1000)}${verifying && progress || ""}`]);
+        const eta = verifying && detail.verifyEtaMs > 0 && ` · ETA ${formatEta(detail.verifyEtaMs / 1000)}` || "";
+        rows.push([verifying && "Verifying for" || "Verified in", `${formatEta(elapsedMs / 1000)}${verifying && progress || ""}${eta}`]);
     }
     if (view.prioritized || view.rangeOutstanding > 0 || view.rangeFinished > 0) {
         const flag = view.prioritized && "prioritized" || "normal";

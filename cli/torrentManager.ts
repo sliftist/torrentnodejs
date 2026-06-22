@@ -87,6 +87,9 @@ export interface TorrentView {
     // pieces that actually need hashing (0/0 when not verifying).
     verifyPiecesRead: number;
     verifyPiecesToRead: number;
+    // Estimated ms until the verify finishes, from read speed so far
+    // (0 = not verifying / not enough data yet to estimate).
+    verifyEtaMs: number;
 }
 
 // The four lists from the spec.
@@ -159,6 +162,9 @@ export interface TorrentDetail {
     verifyDoneAtMs: number;
     verifyPiecesRead: number;
     verifyPiecesToRead: number;
+    // Estimated ms until the verify finishes, from read speed so far
+    // (0 = not verifying / not enough data yet to estimate).
+    verifyEtaMs: number;
 }
 
 interface ManagedTorrent {
@@ -827,6 +833,7 @@ export class TorrentManager extends EventEmitter {
             verifyDoneAtMs: t?.verifyFinishedAt ?? 0,
             verifyPiecesRead: t?.verifyProgress?.piecesRead ?? 0,
             verifyPiecesToRead: t?.verifyProgress?.piecesToRead ?? 0,
+            verifyEtaMs: t?.verifyEtaMs ?? 0,
         };
     }
 
@@ -952,6 +959,7 @@ export class TorrentManager extends EventEmitter {
             rangeChunksReturned: this.rangeStats.get(m.infoHash)?.chunksReturned ?? 0,
             verifyPiecesRead: m.torrent?.verifyProgress?.piecesRead ?? 0,
             verifyPiecesToRead: m.torrent?.verifyProgress?.piecesToRead ?? 0,
+            verifyEtaMs: m.torrent?.verifyEtaMs ?? 0,
         };
     }
 

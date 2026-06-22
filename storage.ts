@@ -250,7 +250,7 @@ export class Storage {
         config?: {
             importToTemp?: boolean;
             onMismatch?: (info: { index: number; computed: Buffer; expected: Buffer }) => void;
-            onProgress?: (info: { piecesRead: number; piecesToRead: number }) => void;
+            onProgress?: (info: { piecesRead: number; piecesToRead: number; bytesRead: number; bytesToRead: number }) => void;
         },
     ): Promise<Bitfield> {
         if (!this.opened) throw new Error("Storage not open");
@@ -291,7 +291,10 @@ export class Storage {
         }
         toRead.sort((a, b) => a - b);
 
-        config?.onProgress?.({ piecesRead: 0, piecesToRead: toRead.length });
+        let bytesToRead = 0;
+        for (const i of toRead) bytesToRead += pieceLengthAt(this.meta, i);
+
+        config?.onProgress?.({ piecesRead: 0, piecesToRead: toRead.length, bytesRead: 0, bytesToRead });
         if (toRead.length) {
             // Hand the whole torrent's read+verify to one worker: it opens the
             // files, streams them in big sequential runs, and SHA-1s every piece
@@ -313,6 +316,11 @@ export class Storage {
             const indices = Int32Array.from(toRead);
             const hashes = new Uint8Array(toRead.length * 20);
             for (let k = 0; k < toRead.length; k++) hashes.set(this.meta.pieceHashes[toRead[k]], k * 20);
+            // The worker reports bytes read so far as it streams; fold each delta
+            // into the global counter live so the UI's read-rate (and the verify
+            // ETA derived from it) tracks a long scan instead of jumping only when
+            // the whole torrent finishes.
+            let reportedBytes = 0;
             const { verified, mismatches, bytesRead } = await sharedVerifyPool().run(
                 {
                     files,
@@ -324,16 +332,20 @@ export class Storage {
                     readRunBytes: READ_RUN_BYTES,
                     wantMismatch: Boolean(config?.onMismatch),
                 },
-                (piecesRead) => config?.onProgress?.({ piecesRead, piecesToRead: toRead.length }),
+                (progress) => {
+                    diskIO.bytesRead += progress.bytesRead - reportedBytes;
+                    reportedBytes = progress.bytesRead;
+                    config?.onProgress?.({ piecesRead: progress.piecesRead, piecesToRead: toRead.length, bytesRead: progress.bytesRead, bytesToRead });
+                },
             );
-            diskIO.bytesRead += bytesRead;
+            diskIO.bytesRead += bytesRead - reportedBytes;
             for (const i of verified) result.set(i);
             if (config?.onMismatch) {
                 for (const m of mismatches) {
                     config.onMismatch({ index: m.index, computed: Buffer.from(m.computed), expected: this.meta.pieceHashes[m.index] });
                 }
             }
-            config?.onProgress?.({ piecesRead: toRead.length, piecesToRead: toRead.length });
+            config?.onProgress?.({ piecesRead: toRead.length, piecesToRead: toRead.length, bytesRead, bytesToRead });
         }
 
         if (config?.importToTemp) {
