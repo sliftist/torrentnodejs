@@ -182,6 +182,10 @@ export function App(props: AppProps) {
         if (focusTorrent) {
             const f = focusTorrent;
             if (view === "list") acts.push({ label: "Open details", run: () => openDetail(f) });
+            acts.push({
+                label: "Delete (data + .torrent)",
+                run: () => { setPendingDelete(f); setOverlay("confirmDelete"); },
+            });
             const paused = f.state === "paused";
             acts.push({
                 label: paused && "Resume" || "Pause",
@@ -191,10 +195,6 @@ export function App(props: AppProps) {
             acts.push({
                 label: prioritized && "Unprioritize" || "Prioritize (web)",
                 run: () => { setOverlay("none"); manager.setPriority(f.infoHash, !prioritized); },
-            });
-            acts.push({
-                label: "Delete (data + .torrent)",
-                run: () => { setPendingDelete(f); setOverlay("confirmDelete"); },
             });
         }
         acts.push({ label: "Add folder…", run: () => { setFolderDraft(""); setOverlay("addFolder"); } });
