@@ -390,7 +390,6 @@ export class Storage {
         }
 
         if (config?.importToTemp) {
-            const valid: { index: number; data: Buffer }[] = [];
             // A right-sized file we optimistically read in place might still turn
             // out to be the wrong content (failed verification). Demote it to the
             // temp copy so the original output is left untouched until the
@@ -404,19 +403,30 @@ export class Storage {
             }
             // The verify pass runs in a worker and keeps no bytes, so every good
             // piece that now belongs to a demoted (temp-backed) file has its bytes
-            // read here on demand and copied into the temp file.
-            for (const i of toCheck) {
-                await yieldIfBlocked();
-                if (!result.get(i)) continue;
-                if (this.plansForPiece(i).every((p) => p.finalized)) continue;
-                let data: Buffer | undefined;
-                try {
-                    data = await this.readAt(i * this.meta.pieceLength, pieceLengthAt(this.meta, i), "existing");
-                } catch {}
-                if (data) valid.push({ index: i, data });
-            }
-            for (const { index, data } of valid) {
-                await this.writeAt(index * this.meta.pieceLength, data, "tempOnly");
+            // read here and copied into the temp file. One buffer and one set of
+            // read handles are reused for the whole pass: the handles stay open for
+            // the entire scan and the piece bytes are read straight into the same
+            // buffer, then written out, instead of allocating per piece or holding
+            // every verified piece in memory at once.
+            const buf = Buffer.alloc(this.meta.pieceLength);
+            const handles = new Map<string, Promise<FileHandle | undefined>>();
+            try {
+                for (const i of toCheck) {
+                    await yieldIfBlocked();
+                    if (!result.get(i)) continue;
+                    if (this.plansForPiece(i).every((p) => p.finalized)) continue;
+                    const len = pieceLengthAt(this.meta, i);
+                    let data: Buffer | undefined;
+                    try {
+                        data = await this.readAt({ offset: i * this.meta.pieceLength, length: len, mode: "existing", out: buf, handles });
+                    } catch {}
+                    if (data) await this.writeAt(i * this.meta.pieceLength, data, "tempOnly");
+                }
+            } finally {
+                for (const pending of handles.values()) {
+                    const handle = await pending;
+                    if (handle) { try { await handle.close(); } catch {} }
+                }
             }
         }
 
@@ -554,7 +564,7 @@ export class Storage {
     async readBlock(pieceIndex: number, begin: number, length: number): Promise<Buffer> {
         if (!this.opened) throw new Error("Storage not open");
         const pieceStart = pieceIndex * this.meta.pieceLength;
-        return this.readAt(pieceStart + begin, length);
+        return this.readAt({ offset: pieceStart + begin, length });
     }
 
     // SHA-1-check a single piece's bytes as they currently sit on disk (the
@@ -617,15 +627,10 @@ export class Storage {
         }
     }
 
-    // "active" reads the data we manage (final file when finalized, else temp)
-    // and throws if a needed file isn't allocated. "existing" reads whatever is
-    // physically on disk — the existing output file (clamped to its real size,
-    // remaining bytes left as zeros) when present, else the temp file — and
-    // never throws, so a scan can salvage partial/mismatched output.
     // Open a file read-only, reusing a previously-opened handle from `cache` when
-    // given one (so a verify pass opens each file once instead of per piece). The
-    // cache stores the in-flight open *promise*, so concurrent callers for the
-    // same path share one handle rather than each opening (and leaking) their own.
+    // given one (so a scan opens each file once instead of per piece). The cache
+    // stores the in-flight open *promise*, so concurrent callers for the same path
+    // share one handle rather than each opening (and leaking) their own.
     private async tryOpenReadOnly(p: string): Promise<FileHandle | undefined> {
         try {
             return await open(p, fsConstants.O_RDONLY);
@@ -644,17 +649,35 @@ export class Storage {
         return pending;
     }
 
-    private async readAt(absoluteOffset: number, length: number, mode: "active" | "existing" = "active", handles?: Map<string, Promise<FileHandle | undefined>>): Promise<Buffer> {
-        const out = Buffer.alloc(length);
+    // Read `length` bytes starting at `offset` in the torrent's linear byte
+    // stream. "active" reads the data we manage (final file when finalized, else
+    // temp) and throws if a needed file isn't allocated; "existing" reads whatever
+    // is physically on disk (output clamped to its real size, gaps left as zeros)
+    // and never throws, so a scan can salvage partial/mismatched output. Pass
+    // `out` to read into a caller-owned buffer (reused across a scan instead of
+    // allocating per read); it must be at least `length` long, and the returned
+    // buffer is a `length`-sized view of it. Pass `handles` to share open read
+    // handles across many reads (a scan opens each file once and closes them
+    // itself) instead of opening and closing a handle on every call.
+    private async readAt(config: {
+        offset: number;
+        length: number;
+        mode?: "active" | "existing";
+        out?: Buffer;
+        handles?: Map<string, Promise<FileHandle | undefined>>;
+    }): Promise<Buffer> {
+        const { offset, length, handles } = config;
+        const mode = config.mode ?? "active";
+        const out = config.out ?? Buffer.alloc(length);
         for (const plan of this.filePlans) {
             const file = plan.file;
             const fileEnd = file.offsetInTorrent + file.length;
-            if (absoluteOffset >= fileEnd) continue;
-            if (absoluteOffset + length <= file.offsetInTorrent) break;
-            const readStart = Math.max(absoluteOffset, file.offsetInTorrent);
-            const readEnd = Math.min(absoluteOffset + length, fileEnd);
+            if (offset >= fileEnd) continue;
+            if (offset + length <= file.offsetInTorrent) break;
+            const readStart = Math.max(offset, file.offsetInTorrent);
+            const readEnd = Math.min(offset + length, fileEnd);
             const fileOffset = readStart - file.offsetInTorrent;
-            const outOffset = readStart - absoluteOffset;
+            const outOffset = readStart - offset;
             const sliceLength = readEnd - readStart;
             if (mode === "existing") {
                 const src = this.existingSource(plan);
@@ -665,7 +688,7 @@ export class Storage {
                 try {
                     diskIO.bytesRead += await readFully(handle, out, outOffset, avail, fileOffset);
                 } finally {
-                    // Leave cached handles open; the verify pass closes them once.
+                    // Leave cached handles open; the scan closes them once at the end.
                     if (!handles) await handle.close();
                 }
                 continue;
@@ -673,14 +696,15 @@ export class Storage {
             if (!plan.allocated) {
                 throw new Error(`Read from unallocated file ${file.path.join("/")}`);
             }
-            const handle = await open(this.activePath(plan), fsConstants.O_RDONLY);
+            const handle = await this.openRead(this.activePath(plan), handles);
+            if (!handle) throw new Error(`Could not open ${this.activePath(plan)} for read`);
             try {
                 diskIO.bytesRead += await readFully(handle, out, outOffset, sliceLength, fileOffset);
             } finally {
-                await handle.close();
+                if (!handles) await handle.close();
             }
         }
-        return out;
+        return out.length === length ? out : out.subarray(0, length);
     }
 
     // The one place that decides which file physically backs a plan's bytes: the
