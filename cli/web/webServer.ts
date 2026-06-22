@@ -5,6 +5,11 @@ import { TorrentManager, TorrentView } from "../torrentManager";
 import { getOrCreatePassword, passwordMatches } from "./webAuth";
 import { getOrCreateCert } from "./webCert";
 
+// Largest slice we serve for a single range request. The browser re-requests
+// the rest with serial follow-up ranges, so this bounds per-request memory and
+// scheduler load without limiting total playback.
+const MAX_RANGE_CHUNK_BYTES = 8 * 1024 * 1024;
+
 // Plain HTTPS status + file-serving server. Deliberately binds the PUBLIC
 // interface (0.0.0.0), outside the WireGuard tunnel, so it can be reached from
 // anywhere — the word-password (passed in the `password` query string) is the
@@ -16,9 +21,11 @@ import { getOrCreateCert } from "./webCert";
 //                              plus a "video" button that swaps the page for a
 //                              fullscreen autoplaying <video> of that link.
 //   GET /status                pretty-printed YAML of every torrent's status.
-//   GET /file/:infoHash/:index the file's bytes, with HTTP Range support. Any
-//                              request (or range) prioritizes that file/those
-//                              pieces in the download scheduler.
+//   GET /file/:infoHash/:index the file's bytes, with HTTP Range support. Each
+//                              range response is capped (the browser re-requests
+//                              the rest serially); a bounded range prioritizes
+//                              its covered pieces in the scheduler, while a
+//                              whole-file pull streams at normal priority.
 export class WebCommandServer {
     private readonly manager: TorrentManager;
     private readonly port: number;
@@ -136,7 +143,14 @@ export class WebCommandServer {
         }
 
         const start = range?.start ?? 0;
-        const endExclusive = range?.endExclusive ?? total;
+        // Cap how much we serve per range request. A <video>'s first request is
+        // usually open-ended (`bytes=0-`); RFC 7233 lets the server return a
+        // smaller range than asked, and the browser then issues serial follow-up
+        // range requests for the rest (using our Content-Range total). Without
+        // this we'd try to stream the whole — possibly multi-GB — file for one
+        // request, flooding the scheduler and the client. A request with no Range
+        // header at all is a plain download, so it gets the full file (200).
+        const endExclusive = range && Math.min(range.endExclusive, start + MAX_RANGE_CHUNK_BYTES) || total;
         const contentType = guessContentType(file.path);
         const headers: Record<string, string> = {
             "content-type": contentType,

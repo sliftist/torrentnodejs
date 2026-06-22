@@ -40,6 +40,21 @@ function get(config: { port: number; path: string; headers?: Record<string, stri
     });
 }
 
+// Read just the response status + headers, then abort — for requests whose body
+// would hang (no peers) but whose headers flush immediately.
+function getHeaders(config: { port: number; path: string; headers?: Record<string, string> }): Promise<{ status: number; headers: Record<string, string | string[] | undefined> }> {
+    return new Promise((resolve, reject) => {
+        const req = https.get(
+            { host: "127.0.0.1", port: config.port, path: config.path, headers: config.headers, rejectUnauthorized: false },
+            (res) => {
+                resolve({ status: res.statusCode || 0, headers: res.headers });
+                req.destroy();
+            },
+        );
+        req.on("error", reject);
+    });
+}
+
 async function main() {
     const work = await mkdtemp(path.join(os.tmpdir(), "bt-web-smoke-"));
     await mkdir(path.join(work, "dl"), { recursive: true });
@@ -105,6 +120,13 @@ async function main() {
     assert.equal(rangeResolved, false, "bounded range request should wait for the piece (no peers => pending)");
     assert.equal(manager.isPrioritized(infoHash), true, "an active bounded range request should prioritize the torrent");
     assert.equal(manager.views()[0].rangeOutstanding, 2, "two outstanding range requests should be reported");
+
+    // --- an open-ended range on the big file is capped to a bounded chunk ---
+    const bigLen = manager.torrentFiles(infoHash)[1].length;
+    const capped = await getHeaders({ port, path: `/file/${infoHash}/1?password=${pw}`, headers: { range: "bytes=0-" } });
+    assert.equal(capped.status, 206, "open-ended range should get 206 Partial Content");
+    assert.equal(String(capped.headers["content-range"]), `bytes 0-8388607/${bigLen}`, "response should be capped to the chunk size");
+    assert.equal(String(capped.headers["content-length"]), "8388608", "content-length should be the capped chunk, not the whole file");
 
     await server.stop();
     await manager.stop();
