@@ -1,4 +1,4 @@
-import { open, mkdir, rename, rm, readFile, writeFile, FileHandle } from "fs/promises";
+import { open, mkdir, rename, rm, rmdir, readFile, writeFile, FileHandle } from "fs/promises";
 import { constants as fsConstants } from "fs";
 import crypto from "crypto";
 import path from "path";
@@ -194,6 +194,31 @@ export class Storage {
         this.filePlans = [];
         this.opened = false;
         this.scanned = false;
+    }
+
+    // Erase everything this torrent owns on disk, whatever state it's in: the
+    // in-progress temp directory (partial downloads live here), the verified-piece
+    // cache, and the finished/partial output files — then prune any output
+    // directories left empty. A primitive: the caller decides when a torrent
+    // should be deleted; storage just knows where all its bytes live.
+    async deleteOnDiskData(): Promise<void> {
+        await this.open();
+        try { await rm(this.incompleteDir(), { recursive: true, force: true }); } catch {}
+        try { await rm(this.checkedCachePath(), { force: true }); } catch {}
+        const dirs = new Set<string>();
+        for (const plan of this.filePlans) {
+            try { await rm(plan.finalPath, { force: true }); } catch {}
+            let dir = path.dirname(plan.finalPath);
+            while (dir.length > this.saveDir.length && dir.startsWith(this.saveDir)) {
+                dirs.add(dir);
+                dir = path.dirname(dir);
+            }
+        }
+        // Deepest first so a parent is only pruned after its children. rmdir
+        // throws on a non-empty dir, which we ignore — shared dirs stay put.
+        for (const dir of [...dirs].sort((a, b) => b.length - a.length)) {
+            try { await rmdir(dir); } catch {}
+        }
     }
 
     async writePiece(pieceIndex: number, data: Buffer): Promise<void> {

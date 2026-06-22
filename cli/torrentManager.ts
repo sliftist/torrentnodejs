@@ -1,7 +1,7 @@
 import { EventEmitter } from "events";
 import crypto from "crypto";
 import path from "path";
-import { readFile, writeFile, rm, rmdir } from "fs/promises";
+import { readFile, writeFile, rm, readdir } from "fs/promises";
 import { tryStat } from "../fsUtils";
 import { Transport } from "../transport";
 import { Torrent, RunMode } from "../torrent";
@@ -11,7 +11,7 @@ import { RateLimiter } from "../rateLimiter";
 import { ChokeManager } from "../chokeManager";
 import { ConnectionBudget } from "../connectionBudget";
 import { DialStats } from "../dialStats";
-import { diskIO } from "../storage";
+import { Storage, diskIO } from "../storage";
 import { yieldIfBlocked } from "../cooperativeYield";
 import { SchedulerSettings } from "./config";
 
@@ -213,6 +213,11 @@ export interface TorrentManagerOptions {
     stateDir?: string;
     peerId?: Buffer;
     mode?: RunMode;
+    // Folders watched for .torrent files, and folders those are copied from.
+    // Used on delete to wipe a torrent's source file from every location it
+    // could be re-discovered, so a deleted torrent can't reappear.
+    sources?: string[];
+    copySources?: string[];
 }
 
 // Owns every torrent's lifecycle. Per the spec: ALL torrents are announced and
@@ -222,6 +227,8 @@ export interface TorrentManagerOptions {
 export class TorrentManager extends EventEmitter {
     private readonly transport: Transport;
     private readonly downloadDir: string;
+    private readonly sources: string[];
+    private readonly copySources: string[];
     private scheduler: SchedulerSettings;
     private readonly peerId: Buffer;
     private readonly stateDir: string;
@@ -283,6 +290,8 @@ export class TorrentManager extends EventEmitter {
         super();
         this.transport = opts.transport;
         this.downloadDir = opts.downloadDir;
+        this.sources = opts.sources ?? [];
+        this.copySources = opts.copySources ?? [];
         this.scheduler = opts.scheduler;
         this.peerId = opts.peerId ?? Buffer.concat([Buffer.from("-CK0001-"), crypto.randomBytes(12)]);
         this.stateDir = opts.stateDir ?? process.cwd();
@@ -440,9 +449,11 @@ export class TorrentManager extends EventEmitter {
         this.emit("update");
     }
 
-    // Permanently remove a torrent: stop it, delete its source .torrent file(s)
-    // so the watcher can't re-add it, delete its downloaded data, and forget all
-    // its bookkeeping. Irreversible — the UI confirms before calling this.
+    // Permanently remove a torrent at any point in its lifecycle: stop it, delete
+    // its .torrent file from every source AND copy-source folder (so neither
+    // watcher can re-add it), delete its on-disk data — finished files, partial
+    // in-progress temp files, and the verify cache — and forget all its
+    // bookkeeping. Irreversible; the UI confirms before calling this.
     async deleteTorrent(infoHash: string): Promise<void> {
         const m = this.torrents.get(infoHash);
         if (!m) return;
@@ -452,6 +463,10 @@ export class TorrentManager extends EventEmitter {
             } catch {}
         }
 
+        // Remove the .torrent file wherever it lives. bySource covers already
+        // loaded files; scanning the source and copy-source folders also catches
+        // a copy-source original (only its copy gets loaded) and any file not yet
+        // picked up by the watcher — otherwise it would just be re-added.
         for (const [source, hash] of [...this.bySource.entries()]) {
             if (hash !== infoHash) continue;
             this.bySource.delete(source);
@@ -459,26 +474,31 @@ export class TorrentManager extends EventEmitter {
                 await rm(source, { force: true });
             } catch {}
         }
-
-        const dirs = new Set<string>();
-        for (const f of m.meta.files) {
-            const full = path.join(this.downloadDir, ...f.path);
+        for (const folder of new Set([...this.sources, ...this.copySources])) {
+            let entries: string[];
             try {
-                await rm(full, { force: true });
-            } catch {}
-            let dir = path.dirname(full);
-            while (dir.length > this.downloadDir.length && dir.startsWith(this.downloadDir)) {
-                dirs.add(dir);
-                dir = path.dirname(dir);
+                entries = await readdir(folder);
+            } catch {
+                continue;
+            }
+            for (const name of entries) {
+                if (!name.toLowerCase().endsWith(".torrent")) continue;
+                const full = path.join(folder, name);
+                let fileHash: string;
+                try {
+                    fileHash = (await parseTorrentFile(full)).infoHash.toString("hex");
+                } catch {
+                    continue;
+                }
+                if (fileHash !== infoHash) continue;
+                this.bySource.delete(full);
+                try {
+                    await rm(full, { force: true });
+                } catch {}
             }
         }
-        // Deepest first so a parent only gets pruned after its children. rmdir
-        // throws on a non-empty dir, which we ignore — shared dirs stay put.
-        for (const dir of [...dirs].sort((a, b) => b.length - a.length)) {
-            try {
-                await rmdir(dir);
-            } catch {}
-        }
+
+        await new Storage(m.meta, this.downloadDir).deleteOnDiskData();
 
         this.torrents.delete(infoHash);
         this.prioritized.delete(infoHash);

@@ -70,6 +70,8 @@ async function main() {
         scheduler: config.scheduler,
         listenPort: config.listenPort,
         mode,
+        sources: config.sources,
+        copySources: config.copySources,
     });
     process.stdout.write(`Run mode: ${MODE_LABEL[mode]} — ${MODE_DESC[mode]}.\n`);
 

@@ -325,5 +325,42 @@ export async function runStorageTests() {
         await rm(multiDir, { recursive: true, force: true });
     }
 
+    // deleteOnDiskData wipes everything a torrent owns regardless of state: a
+    // finished output file, the partial in-progress temp copy, and the verify
+    // cache — so deleting an in-progress torrent leaves nothing behind.
+    const delDir = await mkdtemp(path.join(os.tmpdir(), "bt-storage-delete-"));
+    try {
+        const all = meta.pieceHashes.map((_, i) => i);
+        const infoHashHex = meta.infoHash.toString("hex");
+        const tempRoot = path.join(delDir, ".bittorrent-incomplete", infoHashHex);
+        const cachePath = path.join(delDir, ".bittorrent-checked", `${infoHashHex}.json`);
+        const finalPath = path.join(delDir, "blob.bin");
+        const exists = (p: string) => stat(p).then(() => true).catch(() => false);
+
+        // A partial download (pieces in the temp copy), plus a finished output
+        // file, plus the verify cache written by a scan.
+        const writer = new Storage(meta, delDir, new Set(all));
+        await writer.open();
+        for (let i = 0; i < meta.pieceHashes.length; i++) {
+            const piece = data.subarray(i * pieceLength, Math.min((i + 1) * pieceLength, data.length));
+            await writer.writePiece(i, piece);
+        }
+        await writeFile(finalPath, data);
+        await writer.verifyExistingPieces();
+        await writer.close();
+
+        assert.ok(await exists(tempRoot), "temp dir exists before delete");
+        assert.ok(await exists(finalPath), "output file exists before delete");
+        assert.ok(await exists(cachePath), "checked cache exists before delete");
+
+        await new Storage(meta, delDir).deleteOnDiskData();
+
+        assert.ok(!(await exists(tempRoot)), "deleteOnDiskData removes the in-progress temp dir");
+        assert.ok(!(await exists(finalPath)), "deleteOnDiskData removes the finished output file");
+        assert.ok(!(await exists(cachePath)), "deleteOnDiskData removes the checked cache");
+    } finally {
+        await rm(delDir, { recursive: true, force: true });
+    }
+
     console.log("Storage tests passed.");
 }

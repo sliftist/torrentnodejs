@@ -28,6 +28,7 @@ const stubTransport: Transport = {
 async function main() {
     const work = await mkdtemp(path.join(os.tmpdir(), "bt-cli-smoke-"));
     const sourceDir = path.join(work, "src");
+    const copyDir = path.join(work, "copy");
     const downloadDir = path.join(work, "dl");
     await rm(sourceDir, { recursive: true, force: true });
     await mkdir(sourceDir, { recursive: true });
@@ -60,6 +61,8 @@ async function main() {
         scheduler: { ...DEFAULT_SCHEDULER, downloadSlots: 0 },
         listenPort: 6881,
         stateDir: work,
+        sources: [sourceDir],
+        copySources: [copyDir],
     });
     await manager.start();
 
@@ -132,7 +135,6 @@ async function main() {
     // --- copy source: a .torrent appearing in a watched copy folder is copied
     // into the first regular source, then loaded — so deleting the original
     // can't lose it. ---
-    const copyDir = path.join(work, "copy");
     await mkdir(copyDir, { recursive: true });
     const copyWatcher = new SourceWatcher({
         intervalMs: 200,
@@ -162,13 +164,16 @@ async function main() {
     await mkdir(path.dirname(dataPath), { recursive: true });
     await writeFile(dataPath, "x");
     const archivedSource = path.join(sourceDir, "bbb.torrent");
+    const copyOriginal = path.join(copyDir, "bbb.torrent");
     assert.ok(existsSync(dataPath), "data file staged");
     assert.ok(existsSync(archivedSource), "source .torrent present before delete");
+    assert.ok(existsSync(copyOriginal), "copy-source original present before delete");
     await manager.deleteTorrent(delHash);
     assert.ok(!existsSync(dataPath), "data file removed after delete");
     assert.ok(!existsSync(archivedSource), "source .torrent removed after delete");
+    assert.ok(!existsSync(copyOriginal), "copy-source original removed after delete");
     assert.strictEqual(manager.views().length, 0, "torrent dropped after delete");
-    console.log("delete removed data + .torrent and dropped the torrent");
+    console.log("delete removed data + .torrent (source + copy source) and dropped the torrent");
 
     watcher.stop();
     await manager.stop();
