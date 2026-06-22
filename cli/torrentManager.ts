@@ -75,12 +75,16 @@ export interface TorrentView {
     startedAtMs: number;
     finishedAtMs: number;
     // True when the torrent is currently prioritized (manually or because a file
-    // of it is being streamed over HTTP). The two range counters track HTTP
-    // file/range requests the browser made: how many are streaming now vs. how
-    // many have finished.
+    // of it is being streamed over HTTP). `rangeOutstanding`/`rangeFinished`
+    // count whole HTTP Range requests the browser made (streaming now vs. done).
+    // `rangeChunksRequested`/`rangeChunksReturned` count the individual chunks
+    // those range requests span vs. have been written back, so the UI can tell
+    // whether a stream is blocked or making progress.
     prioritized: boolean;
     rangeOutstanding: number;
     rangeFinished: number;
+    rangeChunksRequested: number;
+    rangeChunksReturned: number;
 }
 
 // The four lists from the spec.
@@ -218,10 +222,11 @@ export class TorrentManager extends EventEmitter {
     // While pending they're guaranteed a slot (but don't get the bandwidth split).
     private readonly forcedSlots = new Map<string, number>();
     // HTTP file-serving range requests the browser made: infoHash -> counters.
-    // `outstanding` is how many are streaming right now; `finished` is how many
-    // have completed. Surfaced in the UI so the user can see their specific
-    // range requests and whether they're progressing.
-    private readonly rangeStats = new Map<string, { outstanding: number; finished: number }>();
+    // `outstanding`/`finished` count whole Range requests (streaming now vs.
+    // done); `chunksRequested`/`chunksReturned` count the individual chunks those
+    // requests span vs. have written back. Surfaced in the UI so the user can see
+    // their specific range chunks and whether they're progressing.
+    private readonly rangeStats = new Map<string, { outstanding: number; finished: number; chunksRequested: number; chunksReturned: number }>();
     private ticker?: NodeJS.Timeout;
     private lastTickMs = Date.now();
     private stopped = false;
@@ -525,8 +530,10 @@ export class TorrentManager extends EventEmitter {
         const firstPiece = Math.floor(absStart / pieceLen);
         const lastPiece = Math.floor((absEnd - 1) / pieceLen);
 
-        const stats = this.rangeStats.get(infoHash) || { outstanding: 0, finished: 0 };
+        const stats = this.rangeStats.get(infoHash) || { outstanding: 0, finished: 0, chunksRequested: 0, chunksReturned: 0 };
         stats.outstanding++;
+        // Every covered piece is one chunk this range request will hand back.
+        stats.chunksRequested += lastPiece - firstPiece + 1;
         this.rangeStats.set(infoHash, stats);
         this.forcedSlots.set(infoHash, (this.forcedSlots.get(infoHash) || 0) + 1);
         // Streaming a file means the user wants it now: prioritize the torrent.
@@ -558,12 +565,14 @@ export class TorrentManager extends EventEmitter {
                 if (readEnd <= readBegin) continue;
                 const chunk = await t.storage.readBlock(p, readBegin, readEnd - readBegin);
                 await write(chunk);
+                stats.chunksReturned++;
+                this.emit("update");
             }
         } finally {
             const remaining = (this.forcedSlots.get(infoHash) || 1) - 1;
             if (remaining <= 0) this.forcedSlots.delete(infoHash);
             else this.forcedSlots.set(infoHash, remaining);
-            const s = this.rangeStats.get(infoHash) || { outstanding: 1, finished: 0 };
+            const s = this.rangeStats.get(infoHash) || { outstanding: 1, finished: 0, chunksRequested: 0, chunksReturned: 0 };
             s.outstanding = Math.max(0, s.outstanding - 1);
             s.finished++;
             this.rangeStats.set(infoHash, s);
@@ -842,6 +851,8 @@ export class TorrentManager extends EventEmitter {
             prioritized: this.prioritized.has(m.infoHash),
             rangeOutstanding: this.rangeStats.get(m.infoHash)?.outstanding ?? 0,
             rangeFinished: this.rangeStats.get(m.infoHash)?.finished ?? 0,
+            rangeChunksRequested: this.rangeStats.get(m.infoHash)?.chunksRequested ?? 0,
+            rangeChunksReturned: this.rangeStats.get(m.infoHash)?.chunksReturned ?? 0,
         };
     }
 
