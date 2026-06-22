@@ -1,7 +1,7 @@
 import { EventEmitter } from "events";
 import crypto from "crypto";
 import path from "path";
-import { readFile, writeFile, rm } from "fs/promises";
+import { readFile, writeFile, rm, mkdir } from "fs/promises";
 import { tryStat } from "../fsUtils";
 import { Transport } from "../transport";
 import { Torrent, RunMode } from "../torrent";
@@ -12,11 +12,15 @@ import { ChokeManager } from "../chokeManager";
 import { ConnectionBudget } from "../connectionBudget";
 import { DialStats } from "../dialStats";
 import { Storage, diskIO } from "../storage";
+import { trackerlessTorrent } from "../createTorrent";
 import { sharedVerifyPool } from "../verifyPool";
 import { yieldIfBlocked } from "../cooperativeYield";
 import { SchedulerSettings } from "./config";
 
 const STATE_FILENAME = "bittorrent.state.json";
+// Git-ignored folder under cwd where one-off debug artifacts (e.g. generated
+// trackerless .torrents for manual peer testing) are written.
+const DEBUG_DIR = "debug";
 const RATE_ALPHA = 0.35; // EMA smoothing for rates
 // A complete torrent counts as "seeding actively" if it has uploaded within
 // this window; otherwise it's idle (no one has downloaded recently).
@@ -546,6 +550,22 @@ export class TorrentManager extends EventEmitter {
         }
         await this.saveState();
         this.emit("update");
+    }
+
+    // Write a trackerless copy of this torrent's .torrent into the debug folder
+    // and return its path. Loading it into another client (with DHT/PEX off)
+    // leaves manual peer-adding as the only way to find us — so anything that
+    // client downloads proves our upload path works. info_hash is preserved.
+    async generateTrackerlessTorrent(infoHash: string): Promise<string> {
+        const m = this.torrents.get(infoHash);
+        if (!m) throw new Error(`Unknown torrent ${infoHash}`);
+        const source = await readFile(m.sourcePath);
+        const stripped = trackerlessTorrent(source);
+        const dir = path.join(process.cwd(), DEBUG_DIR);
+        await mkdir(dir, { recursive: true });
+        const outPath = path.join(dir, `${m.name}.trackerless.torrent`);
+        await writeFile(outPath, stripped);
+        return outPath;
     }
 
     // ---- web-control prioritization ----

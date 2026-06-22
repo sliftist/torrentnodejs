@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { readFile } from "fs/promises";
-import { BencodeDict, BencodeValue, encode } from "./bencode";
+import { BencodeDict, BencodeValue, encode, decodeTorrent } from "./bencode";
 import { TorrentMeta, parseTorrentBuffer } from "./torrentFile";
 
 export interface CreateTorrentOptions {
@@ -61,6 +61,15 @@ export function createTorrentFromData(
     const buffer = encode(torrent);
     const meta = parseTorrentBuffer(buffer);
     return { buffer, meta };
+}
+
+// Rebuild a .torrent from an existing one with every tracker stripped, so a
+// client loading it has nothing to announce to and can only reach peers added
+// by hand. The info dict is copied byte-for-byte from the source, so the
+// info_hash (hence the swarm/content identity) is unchanged.
+export function trackerlessTorrent(source: Buffer): Buffer {
+    const { infoStart, infoEnd } = decodeTorrent(source);
+    return Buffer.concat([Buffer.from("d4:info"), source.subarray(infoStart, infoEnd), Buffer.from("e")]);
 }
 
 export function magnetUri(meta: TorrentMeta): string {

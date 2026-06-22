@@ -84,6 +84,8 @@ export function App(props: AppProps) {
     const [tab, setTab] = useState<DetailTab>("general");
     const [scroll, setScroll] = useState(0);
     const [notice, setNotice] = useState<string>("");
+    // Path of the most recently generated trackerless .torrent (shown in the footer).
+    const [trackerlessPath, setTrackerlessPath] = useState<string>("");
 
     useEffect(() => {
         // The manager fires "update" once per torrent state change, so a batch
@@ -205,6 +207,19 @@ export function App(props: AppProps) {
             acts.push({
                 label: prioritized && "Unprioritize" || "Prioritize (web)",
                 run: () => { setOverlay("none"); manager.setPriority(f.infoHash, !prioritized); },
+            });
+            acts.push({
+                label: "Generate trackerless .torrent",
+                run: async () => {
+                    setOverlay("none");
+                    try {
+                        const outPath = await manager.generateTrackerlessTorrent(f.infoHash);
+                        setTrackerlessPath(outPath);
+                        setNotice(`Trackerless .torrent → ${outPath}`);
+                    } catch (e) {
+                        setNotice(`Generate failed: ${(e as Error).message}`);
+                    }
+                },
             });
         }
         acts.push({ label: "Add folder…", run: () => { setFolderDraft(""); setOverlay("addFolder"); } });
@@ -369,6 +384,7 @@ export function App(props: AppProps) {
                 notice={notice}
                 webUrl={webUrl}
                 debugUrl={debugUrl}
+                trackerlessPath={trackerlessPath}
             />
         </Box>
     );
@@ -445,8 +461,9 @@ function Footer(props: {
     notice: string;
     webUrl?: string;
     debugUrl?: string;
+    trackerlessPath?: string;
 }) {
-    const { width, view, overlay, filter, folderDraft, folders, output, notice, webUrl, debugUrl } = props;
+    const { width, view, overlay, filter, folderDraft, folders, output, notice, webUrl, debugUrl, trackerlessPath } = props;
 
     let topLine: React.ReactNode;
     if (overlay === "filter") {
@@ -496,7 +513,8 @@ function Footer(props: {
             </Box>
             <Box>
                 <Text dimColor>debug: </Text>
-                <Text color={debugUrl && "magenta" || "gray"}>{debugUrl && truncate(debugUrl, width - 9) || "(not started)"}</Text>
+                {Boolean(trackerlessPath) && <Text color="green">{truncate(trackerlessPath || "", width - 9)}</Text>
+                    || <Text color={debugUrl && "magenta" || "gray"}>{debugUrl && truncate(debugUrl, width - 9) || "(not started)"}</Text>}
             </Box>
         </Box>
     );

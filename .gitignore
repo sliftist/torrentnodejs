@@ -12,6 +12,9 @@ downloads
 seed-data/
 *.bin
 
+# Debug artifacts (e.g. generated trackerless .torrents for peer testing).
+debug/
+
 # Stress-test corpora fetched by scripts/fetchCorpus.ts.
 test-corpus/
 corpus-*/
