@@ -159,6 +159,12 @@ export class Torrent extends EventEmitter {
         this.options.downloadLimiter = limiter;
     }
 
+    // Swap the upload (serve-pacing) limiter, mirroring setDownloadLimiter so a
+    // prioritized torrent also gets its own half-bandwidth upload bucket.
+    setUploadLimiter(limiter?: RateLimiter): void {
+        this.options.uploadLimiter = limiter;
+    }
+
     // Nudge every peer to re-pick blocks now (used after a priority change so a
     // newly-requested piece is fetched immediately rather than on the next event).
     kickRequests(): void {

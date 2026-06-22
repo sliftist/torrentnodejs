@@ -75,6 +75,9 @@ export interface TorrentView {
     prioritized: boolean;
     rangeOutstanding: number;
     rangeFinished: number;
+    // Individual piece-chunks the live range requests need vs. have written out.
+    rangeChunksRequested: number;
+    rangeChunksReturned: number;
 }
 
 // The four lists from the spec.
@@ -211,9 +214,12 @@ export class TorrentManager extends EventEmitter {
     // Torrents with an in-flight web block request: infoHash -> pending count.
     // While pending they're guaranteed a slot (but don't get the bandwidth split).
     private readonly forcedSlots = new Map<string, number>();
-    // HTTP file-serving range requests: infoHash -> { outstanding, finished }.
+    // HTTP file-serving range requests: infoHash -> counters. `outstanding` /
+    // `finished` count whole HTTP Range requests; `chunksRequested` /
+    // `chunksReturned` count the individual piece-chunks those requests need vs.
+    // have written out, so the UI can tell whether a stream is making progress.
     // Surfaced in the UI so it's visible which torrents are being streamed.
-    private readonly rangeStats = new Map<string, { outstanding: number; finished: number }>();
+    private readonly rangeStats = new Map<string, { outstanding: number; finished: number; chunksRequested: number; chunksReturned: number }>();
     private ticker?: NodeJS.Timeout;
     private lastTickMs = Date.now();
     private stopped = false;
@@ -241,6 +247,8 @@ export class TorrentManager extends EventEmitter {
     // Dedicated bucket for prioritized torrents: half the global download rate.
     private priorityDownloadLimiter?: RateLimiter;
     private uploadLimiter?: RateLimiter;
+    // Dedicated bucket for prioritized torrents: half the global upload rate.
+    private priorityUploadLimiter?: RateLimiter;
     private chokeManager?: ChokeManager;
     private connectionBudget?: ConnectionBudget;
     private dialStats?: DialStats;
@@ -269,12 +277,12 @@ export class TorrentManager extends EventEmitter {
     // Persisting to disk is the caller's job (it owns the config file).
     updateScheduler(changes: Partial<SchedulerSettings>): void {
         this.scheduler = { ...this.scheduler, ...changes };
-        this.uploadLimiter?.setRate(this.scheduler.uploadMbps * BYTES_PER_MBIT);
         this.connectionBudget?.setMax(this.scheduler.activeConnections);
         this.chokeManager?.setSlots({
             uploadSlots: this.scheduler.uploadSlots,
             optimisticSlots: this.scheduler.optimisticUnchokeSlots,
         });
+        // Owns both download and upload limiter rates (shared + priority buckets).
         this.applyBandwidthSplit();
         this.emit("update");
     }
@@ -310,6 +318,7 @@ export class TorrentManager extends EventEmitter {
         this.downloadLimiter = new RateLimiter(this.scheduler.downloadMbps * BYTES_PER_MBIT);
         this.priorityDownloadLimiter = new RateLimiter((this.scheduler.downloadMbps * BYTES_PER_MBIT) / 2);
         this.uploadLimiter = new RateLimiter(this.scheduler.uploadMbps * BYTES_PER_MBIT);
+        this.priorityUploadLimiter = new RateLimiter((this.scheduler.uploadMbps * BYTES_PER_MBIT) / 2);
         this.connectionBudget = new ConnectionBudget(this.scheduler.activeConnections);
         this.dialStats = new DialStats();
         this.chokeManager = new ChokeManager({
@@ -514,8 +523,10 @@ export class TorrentManager extends EventEmitter {
         const firstPiece = Math.floor(absStart / pieceLen);
         const lastPiece = Math.floor((absEnd - 1) / pieceLen);
 
-        const stats = this.rangeStats.get(infoHash) || { outstanding: 0, finished: 0 };
+        const stats = this.rangeStats.get(infoHash) || { outstanding: 0, finished: 0, chunksRequested: 0, chunksReturned: 0 };
         stats.outstanding++;
+        // Every covered piece is one chunk this request will hand back.
+        stats.chunksRequested += lastPiece - firstPiece + 1;
         this.rangeStats.set(infoHash, stats);
         this.forcedSlots.set(infoHash, (this.forcedSlots.get(infoHash) || 0) + 1);
         // Streaming a file means the user wants it now: prioritize the torrent.
@@ -541,12 +552,14 @@ export class TorrentManager extends EventEmitter {
                 if (readEnd <= readBegin) continue;
                 const chunk = await t.storage.readBlock(p, readBegin, readEnd - readBegin);
                 await write(chunk);
+                stats.chunksReturned++;
+                this.emit("update");
             }
         } finally {
             const remaining = (this.forcedSlots.get(infoHash) || 1) - 1;
             if (remaining <= 0) this.forcedSlots.delete(infoHash);
             else this.forcedSlots.set(infoHash, remaining);
-            const s = this.rangeStats.get(infoHash) || { outstanding: 1, finished: 0 };
+            const s = this.rangeStats.get(infoHash) || { outstanding: 1, finished: 0, chunksRequested: 0, chunksReturned: 0 };
             s.outstanding = Math.max(0, s.outstanding - 1);
             s.finished++;
             this.rangeStats.set(infoHash, s);
@@ -565,20 +578,24 @@ export class TorrentManager extends EventEmitter {
         return this.prioritized.has(m.infoHash) || this.forcedSlots.has(m.infoHash);
     }
 
+    // When any torrent is prioritized, reserve half the global download AND
+    // upload bandwidth for the priority bucket; the rest share the other half.
     private applyBandwidthSplit(): void {
         if (!this.downloadLimiter) return;
-        const full = this.scheduler.downloadMbps * BYTES_PER_MBIT;
-        let sharedRate = full;
-        if (this.prioritized.size > 0) sharedRate = full / 2;
-        this.downloadLimiter.setRate(sharedRate);
-        this.priorityDownloadLimiter?.setRate(full / 2);
+        const hasPriority = this.prioritized.size > 0;
+        const fullDown = this.scheduler.downloadMbps * BYTES_PER_MBIT;
+        this.downloadLimiter.setRate(hasPriority && fullDown / 2 || fullDown);
+        this.priorityDownloadLimiter?.setRate(fullDown / 2);
+        const fullUp = this.scheduler.uploadMbps * BYTES_PER_MBIT;
+        this.uploadLimiter?.setRate(hasPriority && fullUp / 2 || fullUp);
+        this.priorityUploadLimiter?.setRate(fullUp / 2);
     }
 
     private applyLimiter(m: ManagedTorrent): void {
         if (!m.torrent) return;
-        let limiter = this.downloadLimiter;
-        if (this.prioritized.has(m.infoHash)) limiter = this.priorityDownloadLimiter;
-        m.torrent.setDownloadLimiter(limiter);
+        const priority = this.prioritized.has(m.infoHash);
+        m.torrent.setDownloadLimiter(priority && this.priorityDownloadLimiter || this.downloadLimiter);
+        m.torrent.setUploadLimiter(priority && this.priorityUploadLimiter || this.uploadLimiter);
     }
 
     private async ensureStartedTorrent(m: ManagedTorrent): Promise<Torrent> {
@@ -821,6 +838,8 @@ export class TorrentManager extends EventEmitter {
             prioritized: this.prioritized.has(m.infoHash),
             rangeOutstanding: this.rangeStats.get(m.infoHash)?.outstanding ?? 0,
             rangeFinished: this.rangeStats.get(m.infoHash)?.finished ?? 0,
+            rangeChunksRequested: this.rangeStats.get(m.infoHash)?.chunksRequested ?? 0,
+            rangeChunksReturned: this.rangeStats.get(m.infoHash)?.chunksReturned ?? 0,
         };
     }
 
