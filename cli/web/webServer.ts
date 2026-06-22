@@ -17,9 +17,10 @@ const MAX_RANGE_CHUNK_BYTES = 8 * 1024 * 1024;
 // user's home directory.
 //
 // Routes (all require ?password=...):
-//   GET /                      simple HTML index: each file as a download link
-//                              plus a "video" button that swaps the page for a
-//                              fullscreen autoplaying <video> of that link.
+//   GET /                      HTML list of torrents, each linking to its files.
+//   GET /torrent/:infoHash     HTML list of that torrent's files: each a download
+//                              link plus a "video" button that swaps the page for
+//                              a fullscreen autoplaying <video> of that file.
 //   GET /status                pretty-printed YAML of every torrent's status.
 //   GET /file/:infoHash/:index the file's bytes, with HTTP Range support. Each
 //                              range response is capped (the browser re-requests
@@ -77,11 +78,15 @@ export class WebCommandServer {
 
         const parts = url.pathname.split("/").filter(Boolean);
         if (parts.length === 0) {
-            this.serveIndex(res);
+            this.serveTorrents(res);
             return;
         }
         if (parts.length === 1 && parts[0] === "status") {
             this.serveStatus(res);
+            return;
+        }
+        if (parts.length === 2 && parts[0] === "torrent") {
+            this.serveTorrentFiles(res, parts[1]);
             return;
         }
         if (parts.length === 3 && parts[0] === "file") {
@@ -100,22 +105,48 @@ export class WebCommandServer {
         res.end(stringifyYaml({ torrents: status }));
     }
 
-    private serveIndex(res: ServerResponse): void {
+    // Top page: one link per torrent to its files page.
+    private serveTorrents(res: ServerResponse): void {
         const pw = encodeURIComponent(this.password);
         const items: string[] = [];
         for (const v of this.manager.views()) {
-            for (const f of this.manager.torrentFiles(v.infoHash)) {
-                const link = `/file/${v.infoHash}/${f.index}?password=${pw}`;
-                items.push(
-                    `<li><a href="${escapeHtml(link)}">${escapeHtml(f.path)}</a>` +
-                    ` (${formatBytes(f.length)}) ` +
-                    `<button data-name="${escapeHtml(f.path)}" data-src="${escapeHtml(link)}">video</button></li>`
-                );
-            }
+            const link = `/torrent/${v.infoHash}?password=${pw}`;
+            items.push(
+                `<li><a href="${escapeHtml(link)}">${escapeHtml(v.name)}</a>` +
+                ` (${formatBytes(v.sizeBytes)}, ${(v.progress * 100).toFixed(1)}%)</li>`
+            );
         }
         const list = items.length > 0 && items.join("\n") || "<li>(no torrents)</li>";
         res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-        res.end(indexHtml(list));
+        res.end(torrentsHtml(list));
+    }
+
+    // Per-torrent page: each file is a download link plus a "video" button.
+    private serveTorrentFiles(res: ServerResponse, infoHash: string): void {
+        let files: ReturnType<TorrentManager["torrentFiles"]>;
+        try {
+            files = this.manager.torrentFiles(infoHash);
+        } catch {
+            res.writeHead(404, { "content-type": "text/plain" });
+            res.end("Unknown torrent\n");
+            return;
+        }
+        const view = this.manager.views().find((v) => v.infoHash === infoHash);
+        const name = view?.name || infoHash;
+        const pw = encodeURIComponent(this.password);
+        const items: string[] = [];
+        for (const f of files) {
+            const link = `/file/${infoHash}/${f.index}?password=${pw}`;
+            items.push(
+                `<li><a href="${escapeHtml(link)}">${escapeHtml(f.path)}</a>` +
+                ` (${formatBytes(f.length)}) ` +
+                `<button data-name="${escapeHtml(f.path)}" data-src="${escapeHtml(link)}">video</button></li>`
+            );
+        }
+        const list = items.length > 0 && items.join("\n") || "<li>(no files)</li>";
+        const back = `/?password=${pw}`;
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(filesHtml(escapeHtml(name), escapeHtml(back), list));
     }
 
     private async serveFile(req: IncomingMessage, res: ServerResponse, infoHash: string, fileIndex: number): Promise<void> {
@@ -269,12 +300,27 @@ function escapeHtml(s: string): string {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-function indexHtml(list: string): string {
+function torrentsHtml(list: string): string {
     return `<!doctype html>
 <html>
 <head><meta charset="utf-8"><title>torrents</title></head>
 <body>
 <h2 style="font-size:20px">Torrents</h2>
+<ul id="list">
+${list}
+</ul>
+</body>
+</html>
+`;
+}
+
+function filesHtml(title: string, back: string, list: string): string {
+    return `<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>${title}</title></head>
+<body>
+<p><a href="${back}">← all torrents</a></p>
+<h2 style="font-size:20px">${title}</h2>
 <ul id="list">
 ${list}
 </ul>

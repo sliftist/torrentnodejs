@@ -92,13 +92,21 @@ async function main() {
     assert.equal(parsed.torrents.length, 1, "should list one torrent");
     assert.equal(parsed.torrents[0].infoHash, infoHash, "status should include the torrent's infoHash");
 
-    // --- / returns the HTML index with a file link ---
+    // --- / lists torrents, each linking to its files page ---
     const index = await get({ port, path: `/?password=${pw}` });
     assert.equal(index.status, 200, "index should be 200");
     assert.match(String(index.headers["content-type"]), /html/, "index should be HTML");
-    assert.match(index.body.toString(), new RegExp(`/file/${infoHash}/0`), "index should link to the file");
-    assert.match(index.body.toString(), /data-name=/, "index should have a video button with a name");
-    assert.match(index.body.toString(), /play/, "index should read the play query param");
+    assert.match(index.body.toString(), new RegExp(`/torrent/${infoHash}`), "index should link to the torrent's files page");
+
+    // --- /torrent/:hash lists the files with download links + video buttons ---
+    const filesPage = await get({ port, path: `/torrent/${infoHash}?password=${pw}` });
+    assert.equal(filesPage.status, 200, "files page should be 200");
+    assert.match(String(filesPage.headers["content-type"]), /html/, "files page should be HTML");
+    assert.match(filesPage.body.toString(), new RegExp(`/file/${infoHash}/0`), "files page should link to the file");
+    assert.match(filesPage.body.toString(), /data-name=/, "files page should have a video button with a name");
+    assert.match(filesPage.body.toString(), /play/, "files page should read the play query param");
+    const unknownTorrent = await get({ port, path: `/torrent/deadbeef?password=${pw}` });
+    assert.equal(unknownTorrent.status, 404, "unknown torrent files page should be 404");
 
     // --- a whole-file request streams but does NOT prioritize (the browser
     // pulling the entire file shouldn't monopolize the scheduler) ---
