@@ -68,8 +68,7 @@ function GeneralTab(props: { view: TorrentView; detail: TorrentDetail }) {
     ];
     if (view.prioritized || view.rangeOutstanding > 0 || view.rangeFinished > 0) {
         const flag = view.prioritized && "prioritized" || "normal";
-        rows.push(["Streaming", `${view.rangeOutstanding} active / ${view.rangeFinished} done · ${flag}`]);
-        rows.push(["Chunks", `${view.rangeChunksReturned} returned / ${view.rangeChunksRequested} requested`]);
+        rows.push(["Range requests", `${view.rangeOutstanding} active / ${view.rangeFinished} done · ${flag}`]);
     }
     if (view.error) rows.push(["Error", view.error]);
     return (

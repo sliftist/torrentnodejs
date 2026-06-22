@@ -149,6 +149,13 @@ export class WebCommandServer {
         } else {
             res.writeHead(200, headers);
         }
+        // Push the status + headers to the client immediately. Otherwise Node
+        // holds them until the first body byte, which for us can be seconds away
+        // (we may have to fetch the covering piece from peers first) — leaving
+        // the browser's <video> unsure we even support ranges. Flushing up front
+        // tells it "206 + Accept-Ranges + Content-Range" right away so it keeps
+        // issuing range requests as it seeks.
+        res.flushHeaders();
 
         let aborted = false;
         req.on("close", () => { aborted = true; });
