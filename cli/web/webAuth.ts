@@ -1,7 +1,8 @@
 import crypto from "crypto";
 import os from "os";
 import path from "path";
-import { readFile, writeFile, mkdir } from "fs/promises";
+import { writeFile, mkdir } from "fs/promises";
+import { tryReadText } from "../../fsUtils";
 import { PASSWORD_WORDS } from "./wordList";
 
 // Everything the web-control server persists (password + TLS material) lives in
@@ -14,7 +15,7 @@ const PASSWORD_FILE = path.join(WEB_STATE_DIR, "web-password.txt");
 const PASSWORD_WORD_COUNT = 5;
 
 export async function getOrCreatePassword(): Promise<string> {
-    const existing = await readFile(PASSWORD_FILE, "utf8").catch(() => undefined);
+    const existing = await tryReadText(PASSWORD_FILE);
     if (existing && existing.trim()) return existing.trim();
     const password = generatePassword();
     await mkdir(WEB_STATE_DIR, { recursive: true });

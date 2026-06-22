@@ -51,11 +51,13 @@ async function main() {
 
     const matched: { path: string; meta: TorrentMeta }[] = [];
     for (const p of torrentPaths) {
-        const meta = await parseTorrentFile(p).catch((e: Error) => {
-            console.warn(`! failed to parse ${p}: ${e.message}`);
-            return undefined;
-        });
-        if (!meta) continue;
+        let meta: TorrentMeta | undefined;
+        try {
+            meta = await parseTorrentFile(p);
+        } catch (e) {
+            console.warn(`! failed to parse ${p}: ${(e as Error).message}`);
+            continue;
+        }
         if (!meta.name.toLowerCase().includes(filter)) continue;
         matched.push({ path: p, meta });
     }

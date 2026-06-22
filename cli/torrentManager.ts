@@ -1,7 +1,8 @@
 import { EventEmitter } from "events";
 import crypto from "crypto";
 import path from "path";
-import { readFile, writeFile, stat, rm, rmdir } from "fs/promises";
+import { readFile, writeFile, rm, rmdir } from "fs/promises";
+import { tryStat } from "../fsUtils";
 import { Transport } from "../transport";
 import { Torrent, RunMode } from "../torrent";
 import { TorrentMeta, parseTorrentFile, pieceLengthAt } from "../torrentFile";
@@ -333,10 +334,12 @@ export class TorrentManager extends EventEmitter {
         this.peerListener = new PeerListener(this.transport);
         // A failed bind shouldn't take the whole client down; we just won't
         // accept inbound peers (outbound still works).
-        await this.peerListener.start(this.listenPort).catch((e) => {
+        try {
+            await this.peerListener.start(this.listenPort);
+        } catch (e) {
             this.emit("notice", `Listener bind failed: ${(e as Error).message}`);
             this.peerListener = undefined;
-        });
+        }
         this.downloadLimiter = new RateLimiter(this.scheduler.downloadMbps * BYTES_PER_MBIT);
         this.priorityDownloadLimiter = new RateLimiter((this.scheduler.downloadMbps * BYTES_PER_MBIT) / 2);
         this.uploadLimiter = new RateLimiter(this.scheduler.uploadMbps * BYTES_PER_MBIT);
@@ -351,7 +354,13 @@ export class TorrentManager extends EventEmitter {
         this.chokeManager.start();
 
         this.lastTickMs = Date.now();
-        this.ticker = setInterval(() => this.tick().catch((e) => this.emit("error", e)), 1000);
+        this.ticker = setInterval(async () => {
+            try {
+                await this.tick();
+            } catch (e) {
+                this.emit("error", e);
+            }
+        }, 1000);
         this.ticker.unref?.();
     }
 
@@ -381,7 +390,7 @@ export class TorrentManager extends EventEmitter {
         const now = Date.now();
         // Estimate the start time from the source .torrent file's creation time
         // (or its modified time where the platform doesn't track creation).
-        const srcStat = await stat(sourcePath).catch(() => undefined);
+        const srcStat = await tryStat(sourcePath);
         const startedAtMs = srcStat ? (srcStat.birthtimeMs || srcStat.mtimeMs) : 0;
         this.torrents.set(infoHash, {
             infoHash,
@@ -418,7 +427,11 @@ export class TorrentManager extends EventEmitter {
         for (const h of this.bySource.values()) if (h === infoHash) { this.emit("update"); return; }
         const m = this.torrents.get(infoHash);
         if (m) {
-            await m.torrent?.stop().catch(() => {});
+            if (m.torrent) {
+                try {
+                    await m.torrent.stop();
+                } catch {}
+            }
             this.torrents.delete(infoHash);
         }
         this.emit("update");
@@ -430,18 +443,26 @@ export class TorrentManager extends EventEmitter {
     async deleteTorrent(infoHash: string): Promise<void> {
         const m = this.torrents.get(infoHash);
         if (!m) return;
-        await m.torrent?.stop().catch(() => {});
+        if (m.torrent) {
+            try {
+                await m.torrent.stop();
+            } catch {}
+        }
 
         for (const [source, hash] of [...this.bySource.entries()]) {
             if (hash !== infoHash) continue;
             this.bySource.delete(source);
-            await rm(source, { force: true }).catch(() => {});
+            try {
+                await rm(source, { force: true });
+            } catch {}
         }
 
         const dirs = new Set<string>();
         for (const f of m.meta.files) {
             const full = path.join(this.downloadDir, ...f.path);
-            await rm(full, { force: true }).catch(() => {});
+            try {
+                await rm(full, { force: true });
+            } catch {}
             let dir = path.dirname(full);
             while (dir.length > this.downloadDir.length && dir.startsWith(this.downloadDir)) {
                 dirs.add(dir);
@@ -451,7 +472,9 @@ export class TorrentManager extends EventEmitter {
         // Deepest first so a parent only gets pruned after its children. rmdir
         // throws on a non-empty dir, which we ignore — shared dirs stay put.
         for (const dir of [...dirs].sort((a, b) => b.length - a.length)) {
-            await rmdir(dir).catch(() => {});
+            try {
+                await rmdir(dir);
+            } catch {}
         }
 
         this.torrents.delete(infoHash);
@@ -876,7 +899,7 @@ export class TorrentManager extends EventEmitter {
         try {
             let latest = 0;
             for (const f of m.meta.files) {
-                const s = await stat(path.join(this.downloadDir, ...f.path)).catch(() => undefined);
+                const s = await tryStat(path.join(this.downloadDir, ...f.path));
                 if (s && s.mtimeMs > latest) latest = s.mtimeMs;
             }
             if (latest > 0) m.finishedAtMs = latest;
@@ -1106,12 +1129,12 @@ export class TorrentManager extends EventEmitter {
             .sort((a, b) => a.queueOrder - b.queueOrder);
         for (const m of toStart) {
             if (inFlight >= MAX_CONCURRENT_STARTS) break;
-            this.startTorrent(m);
+            void this.startTorrent(m);
             inFlight++;
         }
     }
 
-    private startTorrent(m: ManagedTorrent): void {
+    private async startTorrent(m: ManagedTorrent): Promise<void> {
         m.starting = true;
         const t = new Torrent({
             meta: m.meta,
@@ -1137,30 +1160,29 @@ export class TorrentManager extends EventEmitter {
             m.error = e.message;
             this.emit("update");
         });
-        t.start()
-            .then(() => {
-                m.started = true;
-                m.starting = false;
-                m.verified = true;
-                m.knownProgress = t.progress;
-                // Baseline the rate counters at the post-verification byte counts
-                // so the pieces we already had on disk aren't counted as a sudden
-                // download on the next tick.
-                m.lastDown = t.downloadedBytes;
-                m.lastUp = t.uploadedBytes;
-                m.lastProgressBytes = t.downloadedBytes;
-                // A torrent prioritized before it started gets its half-rate
-                // limiter now that the instance exists.
-                this.applyLimiter(m);
-                this.emit("update");
-            })
-            .catch((e: Error) => {
-                m.error = e.message;
-                m.torrent = undefined;
-                m.started = false;
-                m.starting = false;
-                this.emit("update");
-            });
+        try {
+            await t.start();
+            m.started = true;
+            m.starting = false;
+            m.verified = true;
+            m.knownProgress = t.progress;
+            // Baseline the rate counters at the post-verification byte counts
+            // so the pieces we already had on disk aren't counted as a sudden
+            // download on the next tick.
+            m.lastDown = t.downloadedBytes;
+            m.lastUp = t.uploadedBytes;
+            m.lastProgressBytes = t.downloadedBytes;
+            // A torrent prioritized before it started gets its half-rate
+            // limiter now that the instance exists.
+            this.applyLimiter(m);
+            this.emit("update");
+        } catch (e) {
+            m.error = (e as Error).message;
+            m.torrent = undefined;
+            m.started = false;
+            m.starting = false;
+            this.emit("update");
+        }
     }
 
     private async releaseTorrent(m: ManagedTorrent): Promise<void> {
@@ -1170,7 +1192,11 @@ export class TorrentManager extends EventEmitter {
         m.torrent = undefined;
         m.started = false;
         m.starting = false;
-        await t?.stop().catch(() => {});
+        if (t) {
+            try {
+                await t.stop();
+            } catch {}
+        }
     }
 
     private statePath(): string {
@@ -1189,6 +1215,8 @@ export class TorrentManager extends EventEmitter {
 
     private async saveState(): Promise<void> {
         const body = JSON.stringify({ paused: [...this.pausedPersisted] }, null, 2);
-        await writeFile(this.statePath(), body, "utf8").catch(() => {});
+        try {
+            await writeFile(this.statePath(), body, "utf8");
+        } catch {}
     }
 }

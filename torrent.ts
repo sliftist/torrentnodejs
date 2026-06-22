@@ -306,6 +306,10 @@ export class Torrent extends EventEmitter {
             this.verifyProgressField = undefined;
             this.verifyFinishedAtField = Date.now();
             this.pieceManager.markHaves(have);
+            // Scan mode is read-only: report what's on disk and stop. There are
+            // no temp files to finalize and no network to bring up, so return
+            // before doing either.
+            if (mode === "scan") return;
             await this.storage.finalizeFiles(this.pieceManager.haveBitfield);
             if (this.pieceManager.isComplete()) this.emit("complete");
         }
@@ -326,7 +330,7 @@ export class Torrent extends EventEmitter {
         // Inbound peers arrive through the single shared listener, demuxed by
         // info_hash. A standalone torrent without one simply can't be dialed.
         if (this.options.peerListener) {
-            this.options.peerListener.register(this.infoHashHex, (peer) => this.acceptIncoming(peer));
+            this.options.peerListener.register(this.infoHashHex, (peer) => void this.acceptIncoming(peer));
         }
 
         this.tracker.on("peer", (p: PeerAddress) => this.tryAddPeer(p));
@@ -369,7 +373,7 @@ export class Torrent extends EventEmitter {
 
     private full(): boolean { return (this.options.mode ?? "full") === "full"; }
 
-    private acceptIncoming(peer: InboundPeer): void {
+    private async acceptIncoming(peer: InboundPeer): Promise<void> {
         if (this.stopped) { try { peer.socket.destroy(); } catch { /* */ } return; }
         if (this.peerConnections.size >= this.maxPeers) { try { peer.socket.destroy(); } catch { /* */ } return; }
         if (this.options.connectionBudget && !this.options.connectionBudget.acquire()) {
@@ -389,18 +393,20 @@ export class Torrent extends EventEmitter {
         // handshake (in initialData) isn't missed.
         this.peerMeta.set(key, { ip: peer.info.remoteAddress, port: peer.info.remotePort, direction: "in" });
         this.wirePeer(key, conn);
-        conn.connect().then(() => {
-            if (this.stopped) { conn.destroy(); return; }
-            this.peerConnections.set(key, conn);
-            this.inflightPerPeer.set(key, 0);
-            if (this.full()) this.options.chokeManager?.add(conn);
-            this.emit("peer-connect", { ip: peer.info.remoteAddress, port: peer.info.remotePort, peerId: conn.remotePeerId.toString("hex") });
-            conn.sendBitfield(this.pieceManager.haveBitfield.bytes);
-            void this.pumpRequests(key);
-        }).catch(() => {
+        try {
+            await conn.connect();
+        } catch {
             this.peerMeta.delete(key);
             this.options.connectionBudget?.release();
-        });
+            return;
+        }
+        if (this.stopped) { conn.destroy(); return; }
+        this.peerConnections.set(key, conn);
+        this.inflightPerPeer.set(key, 0);
+        if (this.full()) this.options.chokeManager?.add(conn);
+        this.emit("peer-connect", { ip: peer.info.remoteAddress, port: peer.info.remotePort, peerId: conn.remotePeerId.toString("hex") });
+        conn.sendBitfield(this.pieceManager.haveBitfield.bytes);
+        void this.pumpRequests(key);
     }
 
     private tryAddPeer(p: PeerAddress): void {
@@ -412,11 +418,17 @@ export class Torrent extends EventEmitter {
         if (this.options.connectionBudget && !this.options.connectionBudget.acquire()) return;
         this.attempted.add(key);
         this.options.dialStats?.attempt();
-        this.connectPeer(p, key).catch(() => {
+        void this.dialPeer(p, key);
+    }
+
+    private async dialPeer(p: PeerAddress, key: string): Promise<void> {
+        try {
+            await this.connectPeer(p, key);
+        } catch {
             this.options.dialStats?.fail();
             this.attempted.delete(key);
             this.options.connectionBudget?.release();
-        });
+        }
     }
 
     private async connectPeer(p: PeerAddress, key: string): Promise<void> {
@@ -463,13 +475,21 @@ export class Torrent extends EventEmitter {
         });
         conn.on("unchoke", () => void this.pumpRequests(key));
         conn.on("choke", () => { /* in-flight requests re-issue if the peer disconnects */ });
-        conn.on("piece", (msg: { index: number; begin: number; block: Buffer }) => {
+        conn.on("piece", async (msg: { index: number; begin: number; block: Buffer }) => {
             const cur = this.inflightPerPeer.get(key) || 0;
             this.inflightPerPeer.set(key, Math.max(0, cur - 1));
-            this.handleBlock(key, msg.index, msg.begin, msg.block).catch((e) => this.emit("error", e));
+            try {
+                await this.handleBlock(key, msg.index, msg.begin, msg.block);
+            } catch (e) {
+                this.emit("error", e);
+            }
         });
-        conn.on("request", (req: { index: number; begin: number; length: number }) => {
-            this.serveBlock(conn, req).catch(() => conn.destroy());
+        conn.on("request", async (req: { index: number; begin: number; length: number }) => {
+            try {
+                await this.serveBlock(conn, req);
+            } catch {
+                conn.destroy();
+            }
         });
         conn.on("close", () => this.disconnectPeer(key));
         conn.on("error", () => this.disconnectPeer(key));

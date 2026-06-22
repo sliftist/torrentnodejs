@@ -1,9 +1,10 @@
-import { open, mkdir, rename, stat, rm, readFile, writeFile, FileHandle } from "fs/promises";
+import { open, mkdir, rename, rm, readFile, writeFile, FileHandle } from "fs/promises";
 import { constants as fsConstants } from "fs";
 import crypto from "crypto";
 import path from "path";
 import { TorrentMeta, TorrentFile, pieceLengthAt } from "./torrentFile";
 import { Bitfield } from "./bitfield";
+import { tryStat, pathExists } from "./fsUtils";
 
 interface FilePlan {
     file: TorrentFile;
@@ -138,8 +139,8 @@ export class Storage {
     // verify scan for a torrent that hasn't been downloaded at all).
     async hasStoredData(): Promise<boolean> {
         const contentRoot = path.join(this.saveDir, this.meta.name);
-        if (await stat(contentRoot).then(() => true).catch(() => false)) return true;
-        return await stat(this.incompleteDir()).then(() => true).catch(() => false);
+        if (await pathExists(contentRoot)) return true;
+        return pathExists(this.incompleteDir());
     }
 
     // Stat every file to record what's on disk: the size/mtime of any finished
@@ -152,7 +153,7 @@ export class Storage {
         if (this.scanned) return;
         this.scanned = true;
         const statPlan = async (plan: FilePlan) => {
-            const finalStat = await stat(plan.finalPath).catch(() => undefined);
+            const finalStat = await tryStat(plan.finalPath);
             if (finalStat) {
                 plan.finalSize = finalStat.size;
                 plan.finalMtimeMs = finalStat.mtimeMs;
@@ -165,7 +166,7 @@ export class Storage {
             }
             // Pick up a partial temp file left by a previous run so a resumed
             // download verifies its existing progress.
-            const tempStat = await stat(plan.tempPath).catch(() => undefined);
+            const tempStat = await tryStat(plan.tempPath);
             if (tempStat) {
                 plan.tempSize = tempStat.size;
                 plan.tempMtimeMs = tempStat.mtimeMs;
@@ -210,7 +211,9 @@ export class Storage {
             await rename(plan.tempPath, plan.finalPath);
         }
         if (this.filePlans.every((p) => !p.allocated || p.finalized)) {
-            await rm(this.incompleteDir(), { recursive: true, force: true }).catch(() => {});
+            try {
+                await rm(this.incompleteDir(), { recursive: true, force: true });
+            } catch {}
         }
     }
 
@@ -298,10 +301,14 @@ export class Storage {
         // Reused across the whole pass so a multi-TB file is opened once, not once
         // per piece. Closed in the finally below.
         const handles = new Map<string, Promise<FileHandle | undefined>>();
-        const readRun = (run: number[]) => {
+        const readRun = async (run: number[]): Promise<Buffer | undefined> => {
             const startOffset = run[0] * this.meta.pieceLength;
             const lastEnd = run[run.length - 1] * this.meta.pieceLength + pieceLengthAt(this.meta, run[run.length - 1]);
-            return this.readAt(startOffset, lastEnd - startOffset, "existing", handles).catch(() => undefined);
+            try {
+                return await this.readAt(startOffset, lastEnd - startOffset, "existing", handles);
+            } catch {
+                return undefined;
+            }
         };
         let piecesRead = 0;
         config?.onProgress?.({ piecesRead, piecesToRead: toRead.length });
@@ -337,7 +344,10 @@ export class Storage {
         } finally {
             for (const pending of handles.values()) {
                 const h = await pending;
-                if (h) await h.close().catch(() => {});
+                if (!h) continue;
+                try {
+                    await h.close();
+                } catch {}
             }
         }
 
@@ -360,7 +370,10 @@ export class Storage {
             for (const i of toCheck) {
                 if (!result.get(i) || haveData.has(i)) continue;
                 if (this.plansForPiece(i).every((p) => p.finalized)) continue;
-                const data = await this.readAt(i * this.meta.pieceLength, pieceLengthAt(this.meta, i), "existing").catch(() => undefined);
+                let data: Buffer | undefined;
+                try {
+                    data = await this.readAt(i * this.meta.pieceLength, pieceLengthAt(this.meta, i), "existing");
+                } catch {}
                 if (data) valid.push({ index: i, data });
             }
             for (const { index, data } of valid) {
@@ -440,7 +453,10 @@ export class Storage {
 
     private async loadCheckedCache(): Promise<CheckedCache | undefined> {
         cacheStats.loads++;
-        const raw = await readFile(this.checkedCachePath(), "utf8").catch(() => undefined);
+        let raw: string | undefined;
+        try {
+            raw = await readFile(this.checkedCachePath(), "utf8");
+        } catch {}
         if (!raw) return undefined;
         try {
             const parsed = JSON.parse(raw) as CheckedCache;
@@ -559,11 +575,19 @@ export class Storage {
     // given one (so a verify pass opens each file once instead of per piece). The
     // cache stores the in-flight open *promise*, so concurrent callers for the
     // same path share one handle rather than each opening (and leaking) their own.
+    private async tryOpenReadOnly(p: string): Promise<FileHandle | undefined> {
+        try {
+            return await open(p, fsConstants.O_RDONLY);
+        } catch {
+            return undefined;
+        }
+    }
+
     private openRead(p: string, cache?: Map<string, Promise<FileHandle | undefined>>): Promise<FileHandle | undefined> {
-        if (!cache) return open(p, fsConstants.O_RDONLY).catch(() => undefined);
+        if (!cache) return this.tryOpenReadOnly(p);
         let pending = cache.get(p);
         if (!pending) {
-            pending = open(p, fsConstants.O_RDONLY).catch(() => undefined);
+            pending = this.tryOpenReadOnly(p);
             cache.set(p, pending);
         }
         return pending;

@@ -1,5 +1,6 @@
 import path from "path";
-import { readFile, writeFile, mkdir } from "fs/promises";
+import { writeFile, mkdir } from "fs/promises";
+import { tryReadText } from "../../fsUtils";
 import { WEB_STATE_DIR } from "./webAuth";
 
 // selfsigned ships no type declarations; describe just the bit we call.
@@ -22,8 +23,8 @@ export interface TlsMaterial {
 // self-signed, so clients connect with verification disabled — the password is
 // what actually authorizes access, not the certificate chain.
 export async function getOrCreateCert(): Promise<TlsMaterial> {
-    const cert = await readFile(CERT_FILE, "utf8").catch(() => undefined);
-    const key = await readFile(KEY_FILE, "utf8").catch(() => undefined);
+    const cert = await tryReadText(CERT_FILE);
+    const key = await tryReadText(KEY_FILE);
     if (cert && key) return { cert, key };
 
     const generated = await selfsigned.generate(

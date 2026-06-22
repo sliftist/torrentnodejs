@@ -1,8 +1,11 @@
-import { readFile, writeFile, stat, mkdir } from "fs/promises";
+import { readFile, writeFile, mkdir } from "fs/promises";
 import path from "path";
 import os from "os";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { RunMode } from "../torrent";
+import { tryStat, pathExists } from "../fsUtils";
+
+export { pathExists };
 
 export type { RunMode };
 
@@ -125,7 +128,7 @@ export async function saveConfig(config: Config, dir = process.cwd()): Promise<v
 
 export async function validateWireguardPath(p: string): Promise<string> {
     const resolved = expandHome(p.trim());
-    const s = await stat(resolved).catch(() => null);
+    const s = await tryStat(resolved);
     if (!s || !s.isFile()) throw new Error(`Not a file: ${resolved}`);
     const text = await readFile(resolved, "utf8");
     if (!/\[Interface\]/i.test(text) || !/PrivateKey\s*=/i.test(text)) {
@@ -138,10 +141,6 @@ export async function validateDownloadDir(p: string): Promise<string> {
     const resolved = expandHome(p.trim());
     await mkdir(resolved, { recursive: true });
     return resolved;
-}
-
-export async function pathExists(p: string): Promise<boolean> {
-    return (await stat(p).catch(() => null)) !== null;
 }
 
 // Drive-letter (C:\ or C:/) or UNC (\\server\share) absolute path.
