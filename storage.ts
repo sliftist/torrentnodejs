@@ -5,7 +5,7 @@ import path from "path";
 import { TorrentMeta, TorrentFile, pieceLengthAt } from "./torrentFile";
 import { Bitfield } from "./bitfield";
 import { tryStat, pathExists } from "./fsUtils";
-import { sharedHashPool } from "./hashPool";
+import { sharedVerifyPool } from "./verifyPool";
 
 interface FilePlan {
     file: TorrentFile;
@@ -274,12 +274,6 @@ export class Storage {
         const cachedHave = cached && cached.pieceCount === this.meta.pieceHashes.length
             && new Bitfield(this.meta.pieceHashes.length, Buffer.from(cached.have, "base64"));
 
-        // Only the importToTemp path needs the verified bytes kept around; for a
-        // plain scan, retaining every valid piece would hold the whole torrent in
-        // memory, so we drop the data and just record the bitfield.
-        const keepData = Boolean(config?.importToTemp);
-        const valid: { index: number; data: Buffer }[] = [];
-
         // Decide which pieces actually need reading. Cache-trusted pieces are
         // recorded with no I/O; pieces with no file behind them are simply
         // missing (hashing a zero buffer could never match), so they're skipped
@@ -297,75 +291,53 @@ export class Storage {
         }
         toRead.sort((a, b) => a - b);
 
-        // Group consecutive pieces into big sequential runs. Reading one piece
-        // per syscall on a spinning disk means a seek (or at least a stall)
-        // between every small read; coalescing adjacent pieces into a single
-        // multi-megabyte read lets the platter stream at full speed.
-        const piecesPerRun = Math.max(1, Math.floor(READ_RUN_BYTES / this.meta.pieceLength));
-        const runs: number[][] = [];
-        for (const i of toRead) {
-            const last = runs[runs.length - 1];
-            if (last && i === last[last.length - 1] + 1 && last.length < piecesPerRun) last.push(i);
-            else runs.push([i]);
-        }
-
-        // Reused across the whole pass so a multi-TB file is opened once, not once
-        // per piece. Closed in the finally below.
-        const handles = new Map<string, Promise<FileHandle | undefined>>();
-        const readRun = async (run: number[]): Promise<Buffer | undefined> => {
-            const startOffset = run[0] * this.meta.pieceLength;
-            const lastEnd = run[run.length - 1] * this.meta.pieceLength + pieceLengthAt(this.meta, run[run.length - 1]);
-            try {
-                return await this.readAt(startOffset, lastEnd - startOffset, "existing", handles);
-            } catch {
-                return undefined;
-            }
-        };
-        const pool = sharedHashPool();
-        let piecesRead = 0;
-        config?.onProgress?.({ piecesRead, piecesToRead: toRead.length });
-        try {
-            // One run read-ahead: while the CPU hashes run r, the disk streams the
-            // next (sequentially adjacent) run, so I/O and hashing overlap without
-            // forcing the head to jump around.
-            let prefetch = runs.length ? readRun(runs[0]) : undefined;
-            for (let r = 0; r < runs.length; r++) {
-                const buf = await prefetch;
-                prefetch = r + 1 < runs.length ? readRun(runs[r + 1]) : undefined;
-                if (!buf) {
-                    piecesRead += runs[r].length;
-                    config?.onProgress?.({ piecesRead, piecesToRead: toRead.length });
-                    continue;
+        config?.onProgress?.({ piecesRead: 0, piecesToRead: toRead.length });
+        if (toRead.length) {
+            // Hand the whole torrent's read+verify to one worker: it opens the
+            // files, streams them in big sequential runs, and SHA-1s every piece
+            // itself. Splitting per torrent (not per piece) means one worker owns
+            // a torrent's disk I/O end to end, so N concurrent scans use N cores
+            // without shuttling file bytes across threads — the per-piece handoff
+            // was slower than single-threaded. The worker reads from whatever
+            // currently backs each file (final output or temp copy), resolved
+            // here so the cache/decision logic stays on the main thread.
+            const files = this.filePlans.map((plan) => {
+                const src = this.existingSource(plan);
+                return {
+                    offsetInTorrent: plan.file.offsetInTorrent,
+                    length: plan.file.length,
+                    srcPath: src?.path,
+                    srcLimit: src?.limit ?? 0,
+                };
+            });
+            const indices = Int32Array.from(toRead);
+            const hashes = new Uint8Array(toRead.length * 20);
+            for (let k = 0; k < toRead.length; k++) hashes.set(this.meta.pieceHashes[toRead[k]], k * 20);
+            const { verified, mismatches, bytesRead } = await sharedVerifyPool().run(
+                {
+                    files,
+                    pieceLength: this.meta.pieceLength,
+                    totalLength: this.meta.totalLength,
+                    pieceCount: this.meta.pieceHashes.length,
+                    indices,
+                    hashes,
+                    readRunBytes: READ_RUN_BYTES,
+                    wantMismatch: Boolean(config?.onMismatch),
+                },
+                (piecesRead) => config?.onProgress?.({ piecesRead, piecesToRead: toRead.length }),
+            );
+            diskIO.bytesRead += bytesRead;
+            for (const i of verified) result.set(i);
+            if (config?.onMismatch) {
+                for (const m of mismatches) {
+                    config.onMismatch({ index: m.index, computed: Buffer.from(m.computed), expected: this.meta.pieceHashes[m.index] });
                 }
-                const run = runs[r];
-                const base = run[0] * this.meta.pieceLength;
-                // Hash every piece in the run across the worker pool so all cores
-                // share the load; on a fast disk SHA-1 is the bottleneck, not I/O.
-                await Promise.all(run.map(async (i) => {
-                    const off = i * this.meta.pieceLength - base;
-                    const slice = buf.subarray(off, off + pieceLengthAt(this.meta, i));
-                    const computed = await pool.hash(slice);
-                    if (!computed.equals(this.meta.pieceHashes[i])) {
-                        config?.onMismatch?.({ index: i, computed, expected: this.meta.pieceHashes[i] });
-                        return;
-                    }
-                    result.set(i);
-                    if (keepData) valid.push({ index: i, data: Buffer.from(slice) });
-                }));
-                piecesRead += run.length;
-                config?.onProgress?.({ piecesRead, piecesToRead: toRead.length });
             }
-        } finally {
-            for (const pending of handles.values()) {
-                const h = await pending;
-                if (!h) continue;
-                try {
-                    await h.close();
-                } catch {}
-            }
+            config?.onProgress?.({ piecesRead: toRead.length, piecesToRead: toRead.length });
         }
 
         if (config?.importToTemp) {
+            const valid: { index: number; data: Buffer }[] = [];
             // A right-sized file we optimistically read in place might still turn
             // out to be the wrong content (failed verification). Demote it to the
             // temp copy so the original output is left untouched until the
@@ -377,12 +349,11 @@ export class Storage {
                 await this.allocate(plan.tempPath, plan.file.length);
                 plan.tempSize = plan.file.length;
             }
-            // Pieces trusted from the cache weren't read above; any that are good
-            // and now belong to a demoted (temp-backed) file still need their
-            // bytes copied into the temp file, so read just those on demand.
-            const haveData = new Set(valid.map((v) => v.index));
+            // The verify pass runs in a worker and keeps no bytes, so every good
+            // piece that now belongs to a demoted (temp-backed) file has its bytes
+            // read here on demand and copied into the temp file.
             for (const i of toCheck) {
-                if (!result.get(i) || haveData.has(i)) continue;
+                if (!result.get(i)) continue;
                 if (this.plansForPiece(i).every((p) => p.finalized)) continue;
                 let data: Buffer | undefined;
                 try {
