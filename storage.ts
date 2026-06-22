@@ -162,7 +162,10 @@ export class Storage {
         // download only has to fetch the missing/corrupt pieces. The original
         // output file is left untouched until the download finishes and renames
         // the temp file over it.
-        config?: { importToTemp?: boolean },
+        // onMismatch reports every piece whose on-disk bytes don't hash to the
+        // expected value (a diagnostic for the `check` script); supplying it
+        // also forces a full re-hash, bypassing the cache entirely.
+        config?: { importToTemp?: boolean; onMismatch?: (info: { index: number; computed: Buffer; expected: Buffer }) => void },
     ): Promise<Bitfield> {
         if (!this.opened) throw new Error("Storage not open");
 
@@ -170,7 +173,7 @@ export class Storage {
         // present and unchanged since the last verify, trust the cached result
         // rather than re-hashing potentially gigabytes off disk.
         const signature = this.cacheSignature();
-        if (!config?.importToTemp && signature) {
+        if (!config?.importToTemp && !config?.onMismatch && signature) {
             const cached = await this.loadCheckedCache();
             if (cached && this.cacheMatches(cached, signature)) {
                 return new Bitfield(this.meta.pieceHashes.length, Buffer.from(cached.have, "base64"));
@@ -191,7 +194,11 @@ export class Storage {
                 continue; // unreadable → treat as missing
             }
             const computed = crypto.createHash("sha1").update(data).digest();
-            if (!computed.equals(this.meta.pieceHashes[i])) continue;
+            const expected = this.meta.pieceHashes[i];
+            if (!computed.equals(expected)) {
+                config?.onMismatch?.({ index: i, computed, expected });
+                continue;
+            }
             result.set(i);
             valid.push({ index: i, data });
         }
@@ -212,7 +219,7 @@ export class Storage {
             }
         }
 
-        if (signature) await this.writeCheckedCache(result, signature);
+        if (signature && !config?.onMismatch) await this.writeCheckedCache(result, signature);
         return result;
     }
 
