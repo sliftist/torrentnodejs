@@ -3,6 +3,7 @@ import { stdin, stdout } from "process";
 import {
     Config,
     DEFAULT_SCHEDULER,
+    DEFAULT_PEER_ID_PREFIX,
     saveConfig,
     validateWireguardPath,
     validateDownloadDir,
@@ -34,6 +35,7 @@ export async function runFirstRunSetup(): Promise<Config> {
             downloadDir,
             sources: [],
             copySources: [],
+            peerIdPrefix: DEFAULT_PEER_ID_PREFIX,
             listenPort: 6881,
             webPort: 8443,
             scheduler: { ...DEFAULT_SCHEDULER },

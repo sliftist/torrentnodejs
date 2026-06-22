@@ -68,6 +68,7 @@ async function main() {
         transport,
         downloadDir: config.downloadDir,
         scheduler: config.scheduler,
+        peerIdPrefix: config.peerIdPrefix,
         listenPort: config.listenPort,
         mode,
         sources: config.sources,

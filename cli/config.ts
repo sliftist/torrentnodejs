@@ -11,6 +11,10 @@ export type { RunMode };
 
 export const CONFIG_FILENAME = "bittorrent.config.yaml";
 
+// Default peer_id prefix (BEP 20 "Azureus-style": "-" + client code + version).
+// Mimics Transmission 4.0.6 so we present as a common, well-behaved client.
+export const DEFAULT_PEER_ID_PREFIX = "-TR4006-";
+
 // Cycle order for the in-app mode switch and the canonical list of modes.
 export const RUN_MODES: RunMode[] = ["scan", "scrape", "full"];
 
@@ -76,6 +80,11 @@ export interface Config {
     // into the first regular source (so the originals can be deleted from the
     // copy source without losing the torrent) and then loaded.
     copySources: string[];
+    // The 20-byte peer_id we present to trackers and peers starts with this
+    // string; the remainder is filled with random bytes to reach 20 (BEP 20
+    // convention is "-XX0000-": 2-letter client code + 4-digit version). Set it
+    // to any string up to 20 chars to change how this client identifies itself.
+    peerIdPrefix: string;
     // TCP port we ask WireGuard to listen on for inbound peers (seeding).
     listenPort: number;
     // Public-interface HTTPS port for the web status/file server.
@@ -118,6 +127,7 @@ export async function loadConfig(dir = process.cwd()): Promise<Config> {
         downloadDir: expandHome(parsed.downloadDir),
         sources: (parsed.sources || []).map(expandHome),
         copySources: (parsed.copySources || []).map(expandHome),
+        peerIdPrefix: parsed.peerIdPrefix || DEFAULT_PEER_ID_PREFIX,
         listenPort: parsed.listenPort ?? 6881,
         webPort: parsed.webPort ?? 8443,
         scheduler: { ...DEFAULT_SCHEDULER, ...(parsed.scheduler || {}) },

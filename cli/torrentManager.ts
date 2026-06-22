@@ -15,12 +15,15 @@ import { Storage, diskIO } from "../storage";
 import { trackerlessTorrent } from "../createTorrent";
 import { sharedVerifyPool } from "../verifyPool";
 import { yieldIfBlocked } from "../cooperativeYield";
-import { SchedulerSettings } from "./config";
+import { SchedulerSettings, DEFAULT_PEER_ID_PREFIX } from "./config";
 
 const STATE_FILENAME = "bittorrent.state.json";
 // Git-ignored folder under cwd where one-off debug artifacts (e.g. generated
 // trackerless .torrents for manual peer testing) are written.
 const DEBUG_DIR = "debug";
+// Alphanumeric pool real clients (Transmission included) draw the random tail of
+// the peer_id from, so ours stays printable rather than raw bytes.
+const PEER_ID_POOL = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const RATE_ALPHA = 0.35; // EMA smoothing for rates
 // A complete torrent counts as "seeding actively" if it has uploaded within
 // this window; otherwise it's idle (no one has downloaded recently).
@@ -223,6 +226,9 @@ export interface TorrentManagerOptions {
     listenPort: number;
     stateDir?: string;
     peerId?: Buffer;
+    // First bytes of the 20-byte peer_id; random bytes fill the rest. Lets the
+    // user control how this client identifies itself to trackers and peers.
+    peerIdPrefix?: string;
     mode?: RunMode;
     // Folders watched for .torrent files, and folders those are copied from.
     // Used on delete to wipe a torrent's source file from every location it
@@ -307,7 +313,9 @@ export class TorrentManager extends EventEmitter {
         this.sources = opts.sources ?? [];
         this.copySources = opts.copySources ?? [];
         this.scheduler = opts.scheduler;
-        this.peerId = opts.peerId ?? Buffer.concat([Buffer.from("-CK0001-"), crypto.randomBytes(12)]);
+        const prefixBytes = Buffer.from(opts.peerIdPrefix || DEFAULT_PEER_ID_PREFIX, "ascii").subarray(0, 20);
+        const suffix = Buffer.from(Array.from(crypto.randomBytes(20 - prefixBytes.length), (b) => PEER_ID_POOL.charCodeAt(b % PEER_ID_POOL.length)));
+        this.peerId = opts.peerId ?? Buffer.concat([prefixBytes, suffix]);
         this.stateDir = opts.stateDir ?? process.cwd();
         this.listenPort = opts.listenPort;
         this.mode = opts.mode ?? "full";

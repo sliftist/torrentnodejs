@@ -8,7 +8,7 @@ import { Transport, UdpSocketLike, TcpListenerLike } from "../transport";
 import { EventEmitter } from "events";
 import { TorrentManager } from "./torrentManager";
 import { SourceWatcher } from "./watcher";
-import { Config, DEFAULT_SCHEDULER, saveConfig, loadConfig } from "./config";
+import { Config, DEFAULT_SCHEDULER, DEFAULT_PEER_ID_PREFIX, saveConfig, loadConfig } from "./config";
 
 // A transport that never touches the network. Enough to exercise the manager's
 // parsing / scheduling / snapshot logic without WireGuard.
@@ -40,6 +40,7 @@ async function main() {
         downloadDir,
         sources: [sourceDir],
         copySources: [],
+        peerIdPrefix: DEFAULT_PEER_ID_PREFIX,
         listenPort: 6881,
         webPort: 8443,
         scheduler: { ...DEFAULT_SCHEDULER },
