@@ -431,7 +431,7 @@ function Footer(props: {
 
 function hintFor(view: View): string {
     if (view === "detail") return "Tab/⇧Tab tabs · ↑↓ scroll · a actions · ← back · ^C quit";
-    return "↑↓ select · → open · PgUp/PgDn section · / filter · a actions · Tab mode · ^C quit";
+    return "↑↓ select · →/Enter open · PgUp/PgDn section · / filter · a actions · Tab mode · ^C quit";
 }
 
 function nextRunMode(current: RunMode): RunMode {
