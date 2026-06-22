@@ -48,6 +48,14 @@ const CHECKED_CACHE_VERSION = 1;
 // (verification reads, block writes, upload reads) — not by allocation.
 export const diskIO = { bytesRead: 0, bytesWritten: 0 };
 
+// Verified-piece cache diagnostics, sampled by tooling (e.g. the check harness)
+// to confirm the cache is actually being persisted and reused. writeFailures
+// rising while loadHits stays flat is the signature of a cache that silently
+// can't write to the save dir (permissions, a full or read-only mount, or
+// running out of file descriptors at scale), which forces a full re-hash every
+// startup.
+export const cacheStats = { writes: 0, writeFailures: 0, loads: 0, loadHits: 0, lastWriteError: "" };
+
 // Drive-letter (C:\ or C:/) prefix — used to keep the temp dir on the same
 // volume as the final files so the completion rename never crosses devices.
 const WINDOWS_DRIVE = /^([A-Za-z]):[\\/]/;
@@ -290,11 +298,14 @@ export class Storage {
         return true;
     }
 
-    // True when an output file is physically on disk but isn't a clean, complete
-    // match (mis-sized or wrong content) — i.e. there's salvageable/corrupt data
-    // the UI should surface rather than reporting a plain empty download.
-    get hasMismatchedOutput(): boolean {
-        return this.filePlans.some((p) => p.existingFinalSize !== undefined && !p.finalized);
+    // True when an output file is physically on disk but its pieces don't all
+    // verify against `have` — i.e. there's wrong/partial data in the user's
+    // output files the UI should flag as corrupt rather than reporting a plain
+    // empty/incomplete download. Judged against the verified bitfield, not the
+    // file's size: a right-sized file full of garbage (0% verifying) is still
+    // mismatched output, even though open() optimistically marked it finalized.
+    hasMismatchedOutput(have: Bitfield): boolean {
+        return this.filePlans.some((p) => p.existingFinalSize !== undefined && p.file.length > 0 && !this.fileComplete(p.file, have));
     }
 
     // Whether verification is reading the user's finished output files
@@ -312,11 +323,13 @@ export class Storage {
     }
 
     private async loadCheckedCache(): Promise<CheckedCache | undefined> {
+        cacheStats.loads++;
         const raw = await readFile(this.checkedCachePath(), "utf8").catch(() => undefined);
         if (!raw) return undefined;
         try {
             const parsed = JSON.parse(raw) as CheckedCache;
             if (parsed.version !== CHECKED_CACHE_VERSION) return undefined;
+            cacheStats.loadHits++;
             return parsed;
         } catch {
             return undefined;
@@ -340,8 +353,14 @@ export class Storage {
             files,
             have: Buffer.from(have.bytes).toString("base64"),
         };
-        await mkdir(path.join(this.saveDir, CHECKED_CACHE_DIR), { recursive: true });
-        await writeFile(this.checkedCachePath(), JSON.stringify(cache), "utf8").catch(() => {});
+        try {
+            await mkdir(path.join(this.saveDir, CHECKED_CACHE_DIR), { recursive: true });
+            await writeFile(this.checkedCachePath(), JSON.stringify(cache), "utf8");
+            cacheStats.writes++;
+        } catch (e) {
+            cacheStats.writeFailures++;
+            cacheStats.lastWriteError = e instanceof Error && e.message || String(e);
+        }
     }
 
     private checkedCachePath(): string {

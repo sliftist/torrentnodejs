@@ -48,10 +48,13 @@ export async function runStorageTests() {
         await s1.close();
 
         // Re-open: corrupt one piece on disk and confirm it fails verification.
+        // onMismatch forces a full re-hash, bypassing the size+mtime cache (whose
+        // own behavior is covered by the dedicated cache tests below) so this case
+        // exercises the SHA-1 verifier in isolation.
         const s2 = new Storage(meta, dir);
         await s2.open();
         await s2.writePiece(1, Buffer.alloc(pieceLength, 0x00)); // garbage over piece 1
-        const have2 = await s2.verifyExistingPieces();
+        const have2 = await s2.verifyExistingPieces(undefined, { onMismatch: () => {} });
         assert.ok(!have2.get(1), "corrupted piece 1 must not verify");
         assert.ok(have2.get(0) && have2.get(2) && have2.get(3), "intact pieces still verify");
         await s2.close();
