@@ -127,7 +127,8 @@ export function TorrentTable(props: {
                     <Box key={v.infoHash}>
                         <Box width={2}><Text color="cyan">{selected && "›" || " "}</Text></Box>
                         <Box width={nameWidth}>
-                            <Text bold={selected} inverse={selected}>{truncate(v.name, nameWidth - 1)}</Text>
+                            {(v.prioritized || v.rangeOutstanding > 0) && <Text color="yellow">★ </Text> || undefined}
+                            <Text bold={selected} inverse={selected}>{truncate(v.name, nameWidth - ((v.prioritized || v.rangeOutstanding > 0) && 3 || 1))}</Text>
                         </Box>
                         <Box width={11}><Text color={STATE_COLOR[v.state] || "white"}>{STATE_LABEL[v.state] || v.state}</Text></Box>
                         <Box width={7}><Text>{formatPercent(v.progress)}</Text></Box>

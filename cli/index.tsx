@@ -40,16 +40,17 @@ async function main() {
     await manager.start();
     watcher.start();
 
-    // Public-interface HTTPS/WebSocket control server. This is the one component
+    // Public-interface HTTPS status/file server. This is the one component
     // allowed to listen and talk OUTSIDE the WireGuard tunnel; the word-password
-    // (cached in ~/.bittorrent) gates every command.
+    // (cached in ~/.bittorrent, passed in the ?password= query string) gates
+    // every request.
     const webServer = new WebCommandServer({ manager, port: config.webPort });
     let webUrl: string | undefined;
     let webPassword: string | undefined;
     try {
         await webServer.start();
         webPassword = webServer.password;
-        webUrl = `wss://<this-host>:${config.webPort}`;
+        webUrl = `https://<this-host>:${config.webPort}/?password=${encodeURIComponent(webPassword)}`;
         process.stdout.write(`Web control on port ${config.webPort}. Password: ${webPassword}\n`);
     } catch (e) {
         process.stdout.write(`Web control failed to start: ${(e as Error).message}\n`);

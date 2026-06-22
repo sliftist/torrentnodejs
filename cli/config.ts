@@ -65,7 +65,7 @@ export interface Config {
     sources: string[];
     // TCP port we ask WireGuard to listen on for inbound peers (seeding).
     listenPort: number;
-    // Public-interface HTTPS/WebSocket port for the web-control command server.
+    // Public-interface HTTPS port for the web status/file server.
     webPort: number;
     scheduler: SchedulerSettings;
 }

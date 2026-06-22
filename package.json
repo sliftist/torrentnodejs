@@ -23,13 +23,11 @@
         "selfsigned": "^5.5.0",
         "typenode": "*",
         "wireguardnodejs": "git+ssh://git@github.com/sliftist/wireguardnodejs.git#main",
-        "ws": "^8.21.0",
         "yaml": "^2.4.0"
     },
     "devDependencies": {
         "@types/node": "^22.0.0",
         "@types/react": "^17.0.0",
-        "@types/ws": "^8.18.1",
         "typescript": "^5.4.0"
     }
 }

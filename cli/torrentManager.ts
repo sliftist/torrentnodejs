@@ -69,6 +69,12 @@ export interface TorrentView {
     // Estimated finish: latest modified time across the output files. 0 = unknown.
     startedAtMs: number;
     finishedAtMs: number;
+    // True when the torrent is currently prioritized (manually or because a file
+    // of it is being streamed over HTTP). The two range counters track HTTP
+    // file/range requests: how many are streaming now vs. how many have finished.
+    prioritized: boolean;
+    rangeOutstanding: number;
+    rangeFinished: number;
 }
 
 // The four lists from the spec.
@@ -205,6 +211,9 @@ export class TorrentManager extends EventEmitter {
     // Torrents with an in-flight web block request: infoHash -> pending count.
     // While pending they're guaranteed a slot (but don't get the bandwidth split).
     private readonly forcedSlots = new Map<string, number>();
+    // HTTP file-serving range requests: infoHash -> { outstanding, finished }.
+    // Surfaced in the UI so it's visible which torrents are being streamed.
+    private readonly rangeStats = new Map<string, { outstanding: number; finished: number }>();
     private ticker?: NodeJS.Timeout;
     private lastTickMs = Date.now();
     private stopped = false;
@@ -461,6 +470,95 @@ export class TorrentManager extends EventEmitter {
 
     isPrioritized(infoHash: string): boolean {
         return this.prioritized.has(infoHash);
+    }
+
+    // The files inside a torrent, with the byte offset each one starts at in the
+    // concatenated piece stream. Used by the HTTP file server to map a file (and
+    // a Range within it) onto pieces.
+    torrentFiles(infoHash: string): { index: number; path: string; length: number; offsetInTorrent: number }[] {
+        const m = this.torrents.get(infoHash);
+        if (!m) throw new Error(`Unknown torrent ${infoHash}`);
+        return m.meta.files.map((f, index) => ({
+            index,
+            path: f.path.join("/"),
+            length: f.length,
+            offsetInTorrent: f.offsetInTorrent,
+        }));
+    }
+
+    // Stream a byte range of one file out to `write`, fetching the covering
+    // pieces in order and prioritizing them (and the whole torrent) while the
+    // request is live. `write` should apply backpressure (resolve on drain) and
+    // `isAborted` lets a disconnected client stop the fetch early. Increments the
+    // torrent's range counters so the UI shows active/finished streams.
+    async streamFile(config: {
+        infoHash: string;
+        fileIndex: number;
+        start: number;
+        endExclusive: number;
+        write: (chunk: Buffer) => Promise<void>;
+        isAborted: () => boolean;
+    }): Promise<void> {
+        const { infoHash, fileIndex, start, endExclusive, write, isAborted } = config;
+        const m = this.torrents.get(infoHash);
+        if (!m) throw new Error(`Unknown torrent ${infoHash}`);
+        const file = m.meta.files[fileIndex];
+        if (!file) throw new Error(`file index ${fileIndex} out of range: expected 0..${m.meta.files.length - 1}`);
+        if (start < 0 || endExclusive > file.length || start >= endExclusive) {
+            throw new Error(`range [${start}, ${endExclusive}) out of bounds for file of length ${file.length}`);
+        }
+
+        const absStart = file.offsetInTorrent + start;
+        const absEnd = file.offsetInTorrent + endExclusive;
+        const pieceLen = m.meta.pieceLength;
+        const firstPiece = Math.floor(absStart / pieceLen);
+        const lastPiece = Math.floor((absEnd - 1) / pieceLen);
+
+        const stats = this.rangeStats.get(infoHash) || { outstanding: 0, finished: 0 };
+        stats.outstanding++;
+        this.rangeStats.set(infoHash, stats);
+        this.forcedSlots.set(infoHash, (this.forcedSlots.get(infoHash) || 0) + 1);
+        // Streaming a file means the user wants it now: prioritize the torrent.
+        this.prioritized.add(infoHash);
+        this.applyBandwidthSplit();
+        this.emit("update");
+
+        try {
+            const t = await this.ensureStartedTorrent(m);
+            this.applyLimiter(m);
+            for (let p = firstPiece; p <= lastPiece; p++) {
+                if (isAborted()) return;
+                // Re-assert priority each step so a long stream keeps its lead as
+                // the picker advances past already-fetched pieces.
+                t.pieceManager.prioritizePiece(p);
+                this.runScheduler(Date.now());
+                t.kickRequests();
+                if (!t.pieceManager.haveBitfield.get(p)) await this.waitForPiece(t, p);
+                if (isAborted()) return;
+                const pieceStart = p * pieceLen;
+                const readBegin = Math.max(absStart, pieceStart) - pieceStart;
+                const readEnd = Math.min(absEnd, pieceStart + pieceLengthAt(m.meta, p)) - pieceStart;
+                if (readEnd <= readBegin) continue;
+                const chunk = await t.storage.readBlock(p, readBegin, readEnd - readBegin);
+                await write(chunk);
+            }
+        } finally {
+            const remaining = (this.forcedSlots.get(infoHash) || 1) - 1;
+            if (remaining <= 0) this.forcedSlots.delete(infoHash);
+            else this.forcedSlots.set(infoHash, remaining);
+            const s = this.rangeStats.get(infoHash) || { outstanding: 1, finished: 0 };
+            s.outstanding = Math.max(0, s.outstanding - 1);
+            s.finished++;
+            this.rangeStats.set(infoHash, s);
+            // Once nothing is actively streaming the torrent, drop its priority.
+            if (s.outstanding === 0) {
+                this.prioritized.delete(infoHash);
+                this.applyBandwidthSplit();
+                this.applyLimiter(m);
+            }
+            this.runScheduler(Date.now());
+            this.emit("update");
+        }
     }
 
     private mustHaveSlot(m: ManagedTorrent): boolean {
@@ -720,6 +818,9 @@ export class TorrentManager extends EventEmitter {
             pieceCount: m.meta.pieceHashes.length,
             startedAtMs: m.startedAtMs,
             finishedAtMs: m.finishedAtMs,
+            prioritized: this.prioritized.has(m.infoHash),
+            rangeOutstanding: this.rangeStats.get(m.infoHash)?.outstanding ?? 0,
+            rangeFinished: this.rangeStats.get(m.infoHash)?.finished ?? 0,
         };
     }
 

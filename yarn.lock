@@ -137,13 +137,6 @@
     tslib "^2.8.1"
     tsyringe "^4.10.0"
 
-"@types/node@*":
-  version "26.0.0"
-  resolved "https://registry.yarnpkg.com/@types/node/-/node-26.0.0.tgz#d4aece9e9412e9f2008d59bc2d74f5279316b665"
-  integrity sha512-vf2YFi1iY9lHGwNJMs01biZFbKJkrZR1T6/MlzjhJLPdntOHLhTrDSnSVcdtvjihi4VQNlrFRIxLsDBlQpAipA==
-  dependencies:
-    undici-types "~8.3.0"
-
 "@types/node@^22.0.0":
   version "22.19.21"
   resolved "https://registry.yarnpkg.com/@types/node/-/node-22.19.21.tgz#5c9d843ea385b31ee937a9f743443830620a32de"
@@ -174,13 +167,6 @@
   version "0.16.8"
   resolved "https://registry.yarnpkg.com/@types/scheduler/-/scheduler-0.16.8.tgz#ce5ace04cfeabe7ef87c0091e50752e36707deff"
   integrity sha512-WZLiwShhwLRmeV6zH+GkbOFT6Z6VklCItrDioxUnv+u4Ll+8vKeFySoFyK/0ctcRpOmwAicELfmys1sDc/Rw+A==
-
-"@types/ws@^8.18.1":
-  version "8.18.1"
-  resolved "https://registry.yarnpkg.com/@types/ws/-/ws-8.18.1.tgz#48464e4bf2ddfd17db13d845467f6070ffea4aa9"
-  integrity sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==
-  dependencies:
-    "@types/node" "*"
 
 "@types/yoga-layout@1.9.2":
   version "1.9.2"
@@ -600,11 +586,6 @@ undici-types@~6.21.0:
   resolved "https://registry.yarnpkg.com/undici-types/-/undici-types-6.21.0.tgz#691d00af3909be93a7faa13be61b3a5b50ef12cb"
   integrity sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==
 
-undici-types@~8.3.0:
-  version "8.3.0"
-  resolved "https://registry.yarnpkg.com/undici-types/-/undici-types-8.3.0.tgz#44e9fc9f3244648cdea35e4f9bb2d681e9410809"
-  integrity sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ==
-
 widest-line@^3.1.0:
   version "3.1.0"
   resolved "https://registry.yarnpkg.com/widest-line/-/widest-line-3.1.0.tgz#8292333bbf66cb45ff0de1603b136b7ae1496eca"
@@ -631,11 +612,6 @@ ws@^7, ws@^7.5.5:
   version "7.5.11"
   resolved "https://registry.yarnpkg.com/ws/-/ws-7.5.11.tgz#9460daf1812bb81a423c5b9eac746941a86310fa"
   integrity sha512-zS54Oen9bITtp7kp2XM3AydrCIq1D+HwJOuH+c+e4LfpL/lotP5osijd+UoMnxwAam1GN8R4KtLAyIrIcBNpiA==
-
-ws@^8.21.0:
-  version "8.21.0"
-  resolved "https://registry.yarnpkg.com/ws/-/ws-8.21.0.tgz#012e413fc07429945121b0c153158c4343086951"
-  integrity sha512-Vsp28b7DRcimFQvrqu2Wek3z1iYxDCWqHYB8Qsnk/S4RfaCQzPGPyBNuVjJV3cd6UiKtUtp6sNM77gWvzcCH+g==
 
 yaml@^2.4.0:
   version "2.9.0"

@@ -66,6 +66,10 @@ function GeneralTab(props: { view: TorrentView; detail: TorrentDetail }) {
         ["Pieces", `${detail.pieceCounts.done} done / ${detail.pieceCounts.downloading} active / ${detail.pieceCounts.needed} needed`],
         ["Source", view.sourcePath],
     ];
+    if (view.prioritized || view.rangeOutstanding > 0 || view.rangeFinished > 0) {
+        const flag = view.prioritized && "prioritized" || "normal";
+        rows.push(["Streaming", `${view.rangeOutstanding} active / ${view.rangeFinished} done · ${flag}`]);
+    }
     if (view.error) rows.push(["Error", view.error]);
     return (
         <Box flexDirection="column">
