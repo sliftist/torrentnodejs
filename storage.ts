@@ -6,6 +6,7 @@ import { TorrentMeta, TorrentFile, pieceLengthAt } from "./torrentFile";
 import { Bitfield } from "./bitfield";
 import { tryStat, pathExists } from "./fsUtils";
 import { sharedVerifyPool, VerifyJob } from "./verifyPool";
+import { yieldIfBlocked } from "./cooperativeYield";
 
 interface FilePlan {
     file: TorrentFile;
@@ -309,6 +310,10 @@ export class Storage {
         // instead of hashing terabytes of zeros.
         const toRead: number[] = [];
         for (const i of toCheck) {
+            // A torrent with hundreds of thousands of pieces makes this an
+            // expensive synchronous walk; breathe so a big startup scan doesn't
+            // freeze the UI mid-decision.
+            await yieldIfBlocked();
             if (i < 0 || i >= this.meta.pieceHashes.length) continue;
             if (cachedHave && cached && this.pieceUnchanged(i, cached)) {
                 if (cachedHave.get(i)) result.set(i);
@@ -401,6 +406,7 @@ export class Storage {
             // piece that now belongs to a demoted (temp-backed) file has its bytes
             // read here on demand and copied into the temp file.
             for (const i of toCheck) {
+                await yieldIfBlocked();
                 if (!result.get(i)) continue;
                 if (this.plansForPiece(i).every((p) => p.finalized)) continue;
                 let data: Buffer | undefined;

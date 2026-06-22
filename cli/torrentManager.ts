@@ -261,6 +261,9 @@ export class TorrentManager extends EventEmitter {
     private ticker?: NodeJS.Timeout;
     private lastTickMs = Date.now();
     private stopped = false;
+    // Guards the start drain so the per-second scheduler tick never kicks off a
+    // second concurrent drain on top of one that's still spreading its work out.
+    private draining = false;
     private frontSeq = 0;
     private backSeq = 0;
     // Wire-level traffic rate sampling (EMA over the trailing window).
@@ -1182,22 +1185,40 @@ export class TorrentManager extends EventEmitter {
     }
 
     private ensureStarted(torrents: ManagedTorrent[]): void {
-        const toStart = torrents
-            .filter((m) => {
-                if (m.torrent || m.starting || m.paused || m.error) return false;
-                // Scan mode checks each torrent once; don't restart finished scans.
-                if (this.mode === "scan" && (m.started)) return false;
-                return true;
-            })
-            // Lower queueOrder starts first, so the verify pool enqueues
-            // hashing work in queue order.
-            .sort((a, b) => a.queueOrder - b.queueOrder);
-        // Start them all: the cheap cache-resolution phase runs right away for
-        // every torrent, and only those that still need disk reads enter the
-        // verify pool, which throttles hashing to concurrentScans. This is what
-        // lets a cache-covered torrent come online without waiting behind a
-        // torrent that's busy re-hashing gigabytes.
-        for (const m of toStart) void this.startTorrent(m);
+        // The drain re-scans torrents itself and breathes between starts, so the
+        // tick just kicks it off (and never stacks two).
+        if (this.draining) return;
+        void this.drainStarts();
+    }
+
+    // Bring every pending torrent online. startTorrent's cheap cache-resolution
+    // phase runs right away for each, and only torrents that still need disk
+    // reads enter the verify pool (throttled to concurrentScans) — so a
+    // cache-covered torrent comes online without waiting behind one re-hashing
+    // gigabytes. Each start synchronously builds a Torrent (PieceManager +
+    // Storage + TrackerPool); doing thousands back-to-back froze the UI for tens
+    // of seconds, so we yield between starts to let Ink render and input flow.
+    private async drainStarts(): Promise<void> {
+        this.draining = true;
+        try {
+            for (;;) {
+                const next = [...this.torrents.values()]
+                    .filter((m) => {
+                        if (m.torrent || m.starting || m.paused || m.error) return false;
+                        if (this.mode === "scan" && m.started) return false;
+                        return true;
+                    })
+                    .sort((a, b) => a.queueOrder - b.queueOrder);
+                if (!next.length) return;
+                for (const m of next) {
+                    if (this.stopped) return;
+                    void this.startTorrent(m);
+                    await yieldIfBlocked();
+                }
+            }
+        } finally {
+            this.draining = false;
+        }
     }
 
     private async startTorrent(m: ManagedTorrent): Promise<void> {
