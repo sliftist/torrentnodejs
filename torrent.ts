@@ -133,6 +133,13 @@ export class Torrent extends EventEmitter {
     // scan that's wedged on one torrent is obvious.
     private verifyStartedAtField = 0;
     private verifyFinishedAtField = 0;
+    // Fast (cache) verify result, produced by resolveVerify() and consumed by
+    // runVerifyHash(). Holds the partial have plus the pieces still needing a
+    // disk hash, so the manager can run every torrent's fast phase before any
+    // torrent starts the slow hashing phase.
+    private pendingVerify: { have: Bitfield; toRead: number[]; bytesToRead: number } | undefined;
+    private resolvedField = false;
+    private downloadPrepared = false;
     private readonly options: TorrentOptions;
 
     constructor(config: {
@@ -293,15 +300,32 @@ export class Torrent extends EventEmitter {
     get pieceCounts() { return this.pieceManager.pieceCounts; }
     get files() { return this.meta.files; }
 
+    // Run the whole lifecycle in one call (open → fast verify → hash → import
+    // salvaged pieces → bring up the network). The CLI scheduler drives the
+    // phases separately (resolveVerify across every torrent before any hashing,
+    // and deferring prepareDownload until a slot is granted), but standalone
+    // callers (the library client, demo scripts, the check harness) just want it
+    // all to happen.
     async start(): Promise<void> {
+        await this.resolveVerify();
+        await this.runVerifyHash();
+        if ((this.options.mode ?? "full") === "full") await this.prepareDownload();
+        await this.startNetwork();
+    }
+
+    get resolved(): boolean { return this.resolvedField; }
+
+    // Fast phase: open storage, learn what's on disk, and consult the size+mtime
+    // cache to decide which pieces are already known-good and which still need
+    // their bytes hashed. NO hashing happens here. Returns whether the (slow)
+    // hashing phase has any work to do, so the scheduler can run this for every
+    // torrent before letting any of them grind the disk.
+    async resolveVerify(): Promise<{ needsHash: boolean }> {
         if (this.startedAt) throw new Error("Torrent already started");
         this.startedAt = Date.now();
-
-        const mode = this.options.mode ?? "full";
-
-        // Stamp the verify start before the check so the timer covers the whole
-        // disk-bound phase, including learning what's on disk.
         if (this.options.verifyExisting && !this.options.seedExisting) {
+            // Stamp the verify start so the timer covers the whole disk-bound
+            // phase, including learning what's on disk.
             this.verifyStartedAtField = Date.now();
         }
         await this.storage.open();
@@ -311,29 +335,70 @@ export class Torrent extends EventEmitter {
             // reads for upload find the finished files.
             await this.storage.scanDiskState();
             this.pieceManager.markAllSelectedDone();
-        } else if (this.options.verifyExisting) {
-            // Only a real download (full mode) seeds the temp file from salvaged
-            // output; a scan just reports what's actually on disk.
-            this.verifyProgressField = { piecesRead: 0, piecesToRead: 0, bytesRead: 0, bytesToRead: 0 };
-            const have = await checkTorrentOnDisk({
-                storage: this.storage,
-                pieceCount: this.meta.pieceHashes.length,
-                candidates: this.pieceManager.selected,
-                importToTemp: mode === "full",
+            this.resolvedField = true;
+            return { needsHash: false };
+        }
+        if (!this.options.verifyExisting) {
+            this.resolvedField = true;
+            return { needsHash: false };
+        }
+        this.verifyProgressField = { piecesRead: 0, piecesToRead: 0, bytesRead: 0, bytesToRead: 0 };
+        // Nothing on disk: empty have, no hashing. Mirrors checkTorrentOnDisk's
+        // short-circuit so adding a not-yet-downloaded multi-terabyte torrent is
+        // instant.
+        if (!await this.storage.hasStoredData()) {
+            this.pendingVerify = undefined;
+            this.verifyProgressField = undefined;
+            this.resolvedField = true;
+            return { needsHash: false };
+        }
+        this.pendingVerify = await this.storage.resolveExistingPieces(this.pieceManager.selected);
+        this.resolvedField = true;
+        return { needsHash: this.pendingVerify.toRead.length > 0 };
+    }
+
+    // Slow phase: hash the pieces resolveVerify() flagged, mark the verified ones
+    // as present, and (in full mode) finalize any now-complete files. Must run
+    // after resolveVerify().
+    async runVerifyHash(): Promise<void> {
+        if (!this.resolvedField) throw new Error("runVerifyHash before resolveVerify");
+        const mode = this.options.mode ?? "full";
+        if (this.options.seedExisting || !this.options.verifyExisting) return;
+        if (this.pendingVerify) {
+            const have = await this.storage.hashExistingPieces({
+                have: this.pendingVerify.have,
+                toRead: this.pendingVerify.toRead,
+                bytesToRead: this.pendingVerify.bytesToRead,
                 onProgress: (p) => { this.verifyProgressField = p; },
             });
-            this.verifyProgressField = undefined;
-            this.verifyFinishedAtField = Date.now();
             this.pieceManager.markHaves(have);
-            // Scan mode is read-only: report what's on disk and stop. There are
-            // no temp files to finalize and no network to bring up, so return
-            // before doing either.
-            if (mode === "scan") return;
-            await this.storage.finalizeFiles(this.pieceManager.haveBitfield);
-            if (this.pieceManager.isComplete()) this.emit("complete");
         }
+        this.pendingVerify = undefined;
+        this.verifyProgressField = undefined;
+        this.verifyFinishedAtField = Date.now();
+        // Scan mode is read-only: report what's on disk and stop. There are no
+        // temp files to finalize and no network to bring up.
+        if (mode === "scan") return;
+        await this.storage.finalizeFiles(this.pieceManager.haveBitfield);
+        if (this.pieceManager.isComplete()) this.emit("complete");
+    }
 
-        // Scan-only mode stops here: drive checked, no network brought up.
+    // Copy already-verified pieces out of the user's output files into the
+    // in-progress temp copy, reserving disk for the re-download. Deferred until
+    // the torrent is actually about to download (it has peers/a slot) so a
+    // torrent that never finds a seeder never reserves space. Idempotent.
+    async prepareDownload(): Promise<void> {
+        if (this.downloadPrepared) return;
+        this.downloadPrepared = true;
+        if ((this.options.mode ?? "full") !== "full") return;
+        if (this.options.seedExisting || !this.options.verifyExisting) return;
+        await this.storage.importVerifiedToTemp(this.pieceManager.haveBitfield, this.pieceManager.selected);
+    }
+
+    // Bring up the announce/peer machinery. No-op for scan mode; scrape mode only
+    // scrapes trackers for swarm stats. Must run after verification.
+    async startNetwork(): Promise<void> {
+        const mode = this.options.mode ?? "full";
         if (mode === "scan") return;
 
         this.tracker.on("tracker-error", (e: { url: string; error: Error }) => this.emit("tracker-error", e));

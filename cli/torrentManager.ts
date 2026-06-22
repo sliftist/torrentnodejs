@@ -40,6 +40,7 @@ const STREAM_READAHEAD_BYTES = 32 * 1024 * 1024;
 export type TorrentState =
     | "queued"
     | "unverified"   // on-disk data not hashed yet; waiting its turn to be scanned
+    | "checking"     // fast cache verify (size+mtime), no hashing yet
     | "verifyOut"    // actively hashing the finished output files right now
     | "verifyTmp"    // actively hashing the in-progress temp copies right now
     | "checked"      // scan-mode: drive verified, incomplete
@@ -103,9 +104,10 @@ export interface TorrentView {
 }
 
 // The four lists from the spec.
-export type SectionKey = "verifying" | "downloading" | "seeding" | "downloadingQueued" | "downloadingNoPeers" | "seedingIdle";
+export type SectionKey = "checking" | "verifying" | "downloading" | "seeding" | "downloadingQueued" | "downloadingNoPeers" | "seedingIdle";
 
 export const SECTION_TITLES: Record<SectionKey, string> = {
+    checking: "checking on-disk files (cache verify, no hashing)",
     verifying: "verifying (hashing on-disk data)",
     downloading: "downloading actively",
     seeding: "seeding actively",
@@ -114,7 +116,7 @@ export const SECTION_TITLES: Record<SectionKey, string> = {
     seedingIdle: "seeding, but no one has downloaded for the last minute",
 };
 
-export const SECTION_ORDER: SectionKey[] = ["verifying", "downloading", "seeding", "downloadingQueued", "downloadingNoPeers", "seedingIdle"];
+export const SECTION_ORDER: SectionKey[] = ["checking", "verifying", "downloading", "seeding", "downloadingQueued", "downloadingNoPeers", "seedingIdle"];
 
 export interface TorrentSection {
     key: SectionKey;
@@ -189,9 +191,21 @@ interface ManagedTorrent {
     torrent?: Torrent;
     started: boolean;
     starting: boolean;
-    // True once the on-disk data has been hashed at least once. Until then the
-    // torrent lives in the "verifying" group and can't transfer.
+    // Fast (cache) verify done: we know what's on disk and which pieces still
+    // need hashing. A torrent is in the "checking" group until this is true.
+    resolved: boolean;
+    // The fast phase found pieces whose bytes must be SHA-1-hashed.
+    needsHash: boolean;
+    // Currently in the slow hashing phase (worker reading + hashing on-disk
+    // bytes). Drives the "verifying" (hashing) group vs the "checking" group.
+    hashing: boolean;
+    // True once the on-disk data has been fully verified (fast phase, plus the
+    // hashing phase when it was needed). Until then the torrent can't transfer.
     verified: boolean;
+    // The salvaged-pieces-into-temp import has run (or been started). Gates the
+    // first download slot so disk isn't reserved before we have a seeder.
+    downloadPrepared: boolean;
+    preparing: boolean;
     knownProgress: number;
     paused: boolean;
     error?: string;
@@ -449,7 +463,12 @@ export class TorrentManager extends EventEmitter {
             meta,
             started: false,
             starting: false,
+            resolved: false,
+            needsHash: false,
+            hashing: false,
             verified: false,
+            downloadPrepared: false,
+            preparing: false,
             knownProgress: 0,
             paused: this.pausedPersisted.has(infoHash),
             downloadEnabled: false,
@@ -931,7 +950,7 @@ export class TorrentManager extends EventEmitter {
 
     sections(): TorrentSection[] {
         const buckets: Record<SectionKey, ManagedTorrent[]> = {
-            verifying: [], downloading: [], seeding: [], downloadingQueued: [], downloadingNoPeers: [], seedingIdle: [],
+            checking: [], verifying: [], downloading: [], seeding: [], downloadingQueued: [], downloadingNoPeers: [], seedingIdle: [],
         };
         for (const m of this.torrents.values()) buckets[this.sectionOf(m)].push(m);
         return SECTION_ORDER.map((key) => ({
@@ -945,7 +964,7 @@ export class TorrentManager extends EventEmitter {
     // being hashed right now on top, then everyone else in queue (iteration)
     // order. Every other group keeps the newest-torrent-first ordering.
     private sortBucket(key: SectionKey, items: ManagedTorrent[]): ManagedTorrent[] {
-        if (key === "verifying") {
+        if (key === "verifying" || key === "checking") {
             return items.sort((a, b) => {
                 const aActive = !!(a.torrent && !a.started);
                 const bActive = !!(b.torrent && !b.started);
@@ -959,10 +978,11 @@ export class TorrentManager extends EventEmitter {
     // ---- internals ----
 
     private sectionOf(m: ManagedTorrent): SectionKey {
-        // Everything starts here: a torrent can't transfer until its on-disk data
-        // has been hashed. It stays in this group whether it's actively being
-        // scanned now or still waiting its turn, until verification completes.
-        if (!m.verified && !m.error) return "verifying";
+        // A torrent can't transfer until its on-disk data has been hashed. While
+        // it's only doing the fast cache verify (size+mtime) it sits in
+        // "checking"; once it enters the slow hashing phase it moves to
+        // "verifying" so the user can see which phase it's in.
+        if (!m.verified && !m.error) return m.hashing && "verifying" || "checking";
         const complete = this.isComplete(m);
         if (complete) {
             if (m.torrent && this.uploadedRecently(m)) return "seeding";
@@ -1059,10 +1079,13 @@ export class TorrentManager extends EventEmitter {
     private displayState(m: ManagedTorrent): TorrentState {
         if (m.error) return "error";
         if (m.paused) return "paused";
-        // Until the on-disk data has been hashed, the torrent is unusable:
-        // "verifying" while a scan is actively running, "unverified" while it
-        // waits its turn.
-        if (m.torrent && !m.started) return m.torrent.verifyTarget === "temp" && "verifyTmp" || "verifyOut";
+        // Until the on-disk data has been hashed, the torrent is unusable. The
+        // fast cache verify shows "checking"; the slow hashing phase shows
+        // "verifyOut"/"verifyTmp"; one still waiting its turn shows "unverified".
+        if (m.torrent && !m.started) {
+            if (!m.hashing) return "checking";
+            return m.torrent.verifyTarget === "temp" && "verifyTmp" || "verifyOut";
+        }
         if (!m.verified) return "unverified";
         if (!m.torrent) return "queued";
         const complete = this.isComplete(m);
@@ -1207,11 +1230,33 @@ export class TorrentManager extends EventEmitter {
 
     private setSlot(m: ManagedTorrent, enabled: boolean, now: number): void {
         if (m.downloadEnabled === enabled) return;
+        // Reserving disk for the salvaged pieces is deferred to the moment a
+        // torrent first earns a slot — by which point it has peers to download
+        // from — so a torrent that never finds a seeder never creates files on
+        // disk. Kick the (idempotent) prepare and grant the slot on a later tick
+        // once it's done.
+        if (enabled && !m.downloadPrepared) {
+            void this.prepareDownload(m);
+            return;
+        }
         m.downloadEnabled = enabled;
         m.torrent?.setDownloadEnabled(enabled);
         if (enabled) {
             m.lastProgressBytes = m.torrent?.downloadedBytes ?? 0;
             m.lastProgressAtMs = now;
+        }
+    }
+
+    private async prepareDownload(m: ManagedTorrent): Promise<void> {
+        if (m.downloadPrepared || m.preparing || !m.torrent) return;
+        m.preparing = true;
+        try {
+            await m.torrent.prepareDownload();
+            m.downloadPrepared = true;
+        } catch {
+            // Leave unprepared; a later tick retries before granting the slot.
+        } finally {
+            m.preparing = false;
         }
     }
 
@@ -1222,38 +1267,59 @@ export class TorrentManager extends EventEmitter {
         void this.drainStarts();
     }
 
-    // Bring every pending torrent online. startTorrent's cheap cache-resolution
-    // phase runs right away for each, and only torrents that still need disk
-    // reads enter the verify pool (throttled to concurrentScans) — so a
-    // cache-covered torrent comes online without waiting behind one re-hashing
-    // gigabytes. Each start synchronously builds a Torrent (PieceManager +
-    // Storage + TrackerPool); doing thousands back-to-back froze the UI for tens
-    // of seconds, so we yield between starts to let Ink render and input flow.
+    // Bring every pending torrent online in two phases so the cheap, cache-only
+    // verifications all finish before any torrent grinds the disk hashing:
+    //   Phase 1 (resolve): every pending torrent runs its fast (size+mtime cache)
+    //     verify. No hashing happens. A torrent that needs no hashing (cache-only
+    //     or nothing on disk) is brought fully online right here.
+    //   Phase 2 (hash): only once nothing is left to resolve do the torrents that
+    //     still need hashing enter the verify pool (throttled to concurrentScans)
+    //     and then come online.
+    // Building a Torrent and resolving thousands back-to-back can freeze the UI,
+    // so we yield between units to let Ink render and input flow.
     private async drainStarts(): Promise<void> {
         this.draining = true;
         try {
+            // Phase 1: resolve everything pending (re-scanning so torrents added
+            // mid-drain are resolved too) before any hashing begins.
             for (;;) {
-                const next = [...this.torrents.values()]
-                    .filter((m) => {
-                        if (m.torrent || m.starting || m.paused || m.error) return false;
-                        if (this.mode === "scan" && m.started) return false;
-                        return true;
-                    })
+                const pending = [...this.torrents.values()]
+                    .filter((m) => !m.torrent && !m.starting && !m.paused && !m.error)
                     .sort((a, b) => a.queueOrder - b.queueOrder);
-                if (!next.length) return;
-                for (const m of next) {
-                    if (this.stopped) return;
-                    void this.startTorrent(m);
-                    await yieldIfBlocked();
-                }
+                if (!pending.length) break;
+                await this.resolveBatch(pending);
+            }
+            // Phase 2: hash the torrents that still need it. They fire into the
+            // pool (which throttles concurrency); each sets m.hashing synchronously
+            // so the scan below doesn't re-pick it.
+            const toHash = [...this.torrents.values()]
+                .filter((m) => m.torrent && m.resolved && m.needsHash && !m.verified && !m.hashing && !m.paused && !m.error)
+                .sort((a, b) => a.queueOrder - b.queueOrder);
+            for (const m of toHash) {
+                if (this.stopped) return;
+                void this.hashTorrent(m);
+                await yieldIfBlocked();
             }
         } finally {
             this.draining = false;
         }
     }
 
-    private async startTorrent(m: ManagedTorrent): Promise<void> {
-        m.starting = true;
+    private async resolveBatch(batch: ManagedTorrent[]): Promise<void> {
+        let next = 0;
+        const worker = async () => {
+            while (next < batch.length) {
+                if (this.stopped) return;
+                await this.resolveTorrent(batch[next++]);
+                await yieldIfBlocked();
+            }
+        };
+        // A bounded fan-out: resolves are stat/cache-read bound, so a few at a
+        // time keeps the disk busy without spawning thousands of concurrent stats.
+        await Promise.all(Array.from({ length: Math.min(8, batch.length) }, worker));
+    }
+
+    private buildTorrent(m: ManagedTorrent): Torrent {
         const t = new Torrent({
             meta: m.meta,
             transport: this.transport,
@@ -1273,34 +1339,75 @@ export class TorrentManager extends EventEmitter {
                 listenPort: this.listenPort,
             },
         });
-        m.torrent = t;
         t.on("error", (e: Error) => {
             m.error = e.message;
             this.emit("update");
         });
+        return t;
+    }
+
+    // Phase 1 for one torrent: build it and run the fast cache verify. A torrent
+    // that needs no hashing is brought fully online immediately; one that does is
+    // left for phase 2.
+    private async resolveTorrent(m: ManagedTorrent): Promise<void> {
+        if (m.torrent || m.starting || m.paused || m.error) return;
+        m.starting = true;
+        const t = this.buildTorrent(m);
+        m.torrent = t;
         try {
-            await t.start();
-            m.started = true;
-            m.starting = false;
-            m.verified = true;
-            m.knownProgress = t.progress;
-            // Baseline the rate counters at the post-verification byte counts
-            // so the pieces we already had on disk aren't counted as a sudden
-            // download on the next tick.
-            m.lastDown = t.downloadedBytes;
-            m.lastUp = t.uploadedBytes;
-            m.lastProgressBytes = t.downloadedBytes;
-            // A torrent prioritized before it started gets its half-rate
-            // limiter now that the instance exists.
-            this.applyLimiter(m);
+            const { needsHash } = await t.resolveVerify();
+            m.resolved = true;
+            m.needsHash = needsHash;
+            if (!needsHash) await this.completeStart(m);
             this.emit("update");
         } catch (e) {
-            m.error = (e as Error).message;
-            m.torrent = undefined;
-            m.started = false;
-            m.starting = false;
-            this.emit("update");
+            this.failStart(m, e as Error);
         }
+    }
+
+    // Phase 2 for one torrent: run the slow hashing phase, then bring it online.
+    private async hashTorrent(m: ManagedTorrent): Promise<void> {
+        if (!m.torrent || m.verified || m.hashing) return;
+        m.hashing = true;
+        try {
+            await this.completeStart(m);
+        } catch (e) {
+            this.failStart(m, e as Error);
+        } finally {
+            m.hashing = false;
+        }
+    }
+
+    // Finish verification (hashing phase, instant when there's nothing to hash)
+    // and bring up the network, marking the torrent online and verified.
+    private async completeStart(m: ManagedTorrent): Promise<void> {
+        const t = m.torrent;
+        if (!t) return;
+        await t.runVerifyHash();
+        await t.startNetwork();
+        m.started = true;
+        m.starting = false;
+        m.verified = true;
+        m.knownProgress = t.progress;
+        // Baseline the rate counters at the post-verification byte counts so the
+        // pieces we already had on disk aren't counted as a sudden download.
+        m.lastDown = t.downloadedBytes;
+        m.lastUp = t.uploadedBytes;
+        m.lastProgressBytes = t.downloadedBytes;
+        // A torrent prioritized before it started gets its half-rate limiter now
+        // that the instance exists.
+        this.applyLimiter(m);
+        this.emit("update");
+    }
+
+    private failStart(m: ManagedTorrent, e: Error): void {
+        m.error = e.message;
+        m.torrent = undefined;
+        m.started = false;
+        m.starting = false;
+        m.resolved = false;
+        m.needsHash = false;
+        this.emit("update");
     }
 
     private async releaseTorrent(m: ManagedTorrent): Promise<void> {
@@ -1310,6 +1417,12 @@ export class TorrentManager extends EventEmitter {
         m.torrent = undefined;
         m.started = false;
         m.starting = false;
+        m.resolved = false;
+        m.needsHash = false;
+        m.hashing = false;
+        m.verified = false;
+        m.downloadPrepared = false;
+        m.preparing = false;
         if (t) {
             try {
                 await t.stop();

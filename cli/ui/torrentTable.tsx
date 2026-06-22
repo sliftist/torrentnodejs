@@ -7,6 +7,7 @@ import { formatTime } from "socket-function/src/formatting/format";
 const STATE_COLOR: Record<string, string> = {
     queued: "gray",
     unverified: "gray",
+    checking: "blue",
     verifyOut: "blue",
     verifyTmp: "blue",
     checked: "blue",
@@ -29,6 +30,7 @@ const STATE_LABEL: Record<string, string> = {
 };
 
 const SECTION_COLOR: Record<string, string> = {
+    checking: "blue",
     verifying: "blue",
     downloading: "cyan",
     downloadingQueued: "gray",

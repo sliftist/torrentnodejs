@@ -257,37 +257,28 @@ export class Storage {
         }
     }
 
-    // Read every candidate piece from disk and SHA-1-check it against the
-    // torrent's hash list. Returns a Bitfield of pieces that are present and
-    // valid. By default checks the touched/selected pieces (the only ones we
-    // allocate); pass an explicit set to narrow further. Used on startup to
-    // resume a partial download or confirm a seed without re-downloading.
-    async verifyExistingPieces(
+    // The fast phase of a verify: read what's on disk and consult the
+    // size+mtime cache, deciding which pieces are already known-good (no I/O) and
+    // which still need their bytes hashed. NO hashing happens here, so a folder
+    // full of unchanged torrents resolves near-instantly — this is the phase that
+    // must run for every torrent before any of them starts the slow hashing phase.
+    // Returns the partial `have` (cache-trusted pieces) plus the read plan that
+    // hashExistingPieces() consumes. Cache-trusted pieces are recorded with no
+    // I/O; pieces with no file behind them are simply missing (hashing a zero
+    // buffer could never match), so they're skipped — that's what makes a torrent
+    // whose data isn't on disk verify instantly instead of hashing terabytes of
+    // zeros. The diagnostic `check` path passes wantMismatch to ignore the cache
+    // so it always reads and reports real on-disk state.
+    async resolveExistingPieces(
         candidates?: Iterable<number>,
-        // When importToTemp is set, every piece that verifies against an
-        // existing output file is copied into the in-progress temp file, so the
-        // download only has to fetch the missing/corrupt pieces. The original
-        // output file is left untouched until the download finishes and renames
-        // the temp file over it.
-        // onMismatch reports every piece whose on-disk bytes don't hash to the
-        // expected value (a diagnostic for the `check` script); supplying it
-        // also forces a full re-hash, bypassing the cache entirely.
-        // onProgress reports how many of the pieces that actually need reading
-        // have been hashed so far (cache-trusted and unbacked pieces are
-        // instant, so they're excluded from the total) — used to show live scan
-        // progress for the slow, disk-bound part of a verify.
-        config?: {
-            importToTemp?: boolean;
-            onMismatch?: (info: { index: number; computed: Buffer; expected: Buffer }) => void;
-            onProgress?: (info: { piecesRead: number; piecesToRead: number; bytesRead: number; bytesToRead: number }) => void;
-        },
-    ): Promise<Bitfield> {
+        config?: { wantMismatch?: boolean },
+    ): Promise<{ have: Bitfield; toCheck: number[]; toRead: number[]; bytesToRead: number }> {
         if (!this.opened) throw new Error("Storage not open");
         // Verifying needs to know what's on disk; scanDiskState is idempotent, so
         // callers that already scanned (e.g. the seed path) pay nothing.
         await this.scanDiskState();
 
-        const result = new Bitfield(this.meta.pieceHashes.length);
+        const have = new Bitfield(this.meta.pieceHashes.length);
         const toCheck = candidates
             ? [...candidates]
             : (this.touchedPieces ? [...this.touchedPieces] : this.meta.pieceHashes.map((_, i) => i));
@@ -295,19 +286,11 @@ export class Storage {
         // Per-file (size+mtime) → verified-piece cache. A piece is trusted from
         // the cache only when every file it overlaps is still present at the
         // same size and mtime, so a single changed/corrupt/missing file forces a
-        // re-hash of just its own pieces rather than the whole torrent — and
-        // unchanged files (including ones whose pieces are known-bad) are never
-        // re-hashed on later startups. The diagnostic `check` path ignores the
-        // cache so it always reads and reports real on-disk state.
-        const cached = config?.onMismatch ? undefined : await this.loadCheckedCache();
+        // re-hash of just its own pieces rather than the whole torrent.
+        const cached = config?.wantMismatch ? undefined : await this.loadCheckedCache();
         const cachedHave = cached && cached.pieceCount === this.meta.pieceHashes.length
             && new Bitfield(this.meta.pieceHashes.length, Buffer.from(cached.have, "base64"));
 
-        // Decide which pieces actually need reading. Cache-trusted pieces are
-        // recorded with no I/O; pieces with no file behind them are simply
-        // missing (hashing a zero buffer could never match), so they're skipped
-        // — that's what makes a torrent whose data isn't on disk verify instantly
-        // instead of hashing terabytes of zeros.
         const toRead: number[] = [];
         for (const i of toCheck) {
             // A torrent with hundreds of thousands of pieces makes this an
@@ -316,7 +299,7 @@ export class Storage {
             await yieldIfBlocked();
             if (i < 0 || i >= this.meta.pieceHashes.length) continue;
             if (cachedHave && cached && this.pieceUnchanged(i, cached)) {
-                if (cachedHave.get(i)) result.set(i);
+                if (cachedHave.get(i)) have.set(i);
                 continue;
             }
             if (!this.pieceBacked(i)) continue;
@@ -326,8 +309,25 @@ export class Storage {
 
         let bytesToRead = 0;
         for (const i of toRead) bytesToRead += pieceLengthAt(this.meta, i);
+        return { have, toCheck, toRead, bytesToRead };
+    }
 
-        config?.onProgress?.({ piecesRead: 0, piecesToRead: toRead.length, bytesRead: 0, bytesToRead });
+    // The slow phase of a verify: hand the pieces resolveExistingPieces() flagged
+    // as needing bytes to a worker, which streams the files, SHA-1s every piece,
+    // and reports progress. Verified pieces are OR'd into `have`, which is then
+    // persisted to the size+mtime cache so the next startup trusts them without
+    // re-reading. Calling with an empty toRead is a no-op fast path (still writes
+    // the cache so cache-only resolves persist their trusted set).
+    async hashExistingPieces(config: {
+        have: Bitfield;
+        toRead: number[];
+        bytesToRead: number;
+        onMismatch?: (info: { index: number; computed: Buffer; expected: Buffer }) => void;
+        onProgress?: (info: { piecesRead: number; piecesToRead: number; bytesRead: number; bytesToRead: number }) => void;
+    }): Promise<Bitfield> {
+        if (!this.opened) throw new Error("Storage not open");
+        const { have, toRead, bytesToRead } = config;
+        config.onProgress?.({ piecesRead: 0, piecesToRead: toRead.length, bytesRead: 0, bytesToRead });
         if (toRead.length) {
             // Hand the whole torrent's read+verify to one worker: it opens the
             // files, streams them in big sequential runs, and SHA-1s every piece
@@ -361,7 +361,7 @@ export class Storage {
                     indices,
                     hashes,
                     readRunBytes: READ_RUN_BYTES,
-                    wantMismatch: Boolean(config?.onMismatch),
+                    wantMismatch: Boolean(config.onMismatch),
                     // Injected by the pool at dispatch from the global scan cap.
                     maxBytesPerSec: 0,
                 };
@@ -376,62 +376,99 @@ export class Storage {
                 (progress) => {
                     diskIO.bytesRead += progress.bytesRead - reportedBytes;
                     reportedBytes = progress.bytesRead;
-                    config?.onProgress?.({ piecesRead: progress.piecesRead, piecesToRead: toRead.length, bytesRead: progress.bytesRead, bytesToRead });
+                    config.onProgress?.({ piecesRead: progress.piecesRead, piecesToRead: toRead.length, bytesRead: progress.bytesRead, bytesToRead });
                 },
             );
             diskIO.bytesRead += bytesRead - reportedBytes;
-            for (const i of verified) result.set(i);
-            if (config?.onMismatch) {
+            for (const i of verified) have.set(i);
+            if (config.onMismatch) {
                 for (const m of mismatches) {
                     config.onMismatch({ index: m.index, computed: Buffer.from(m.computed), expected: this.meta.pieceHashes[m.index] });
                 }
             }
-            config?.onProgress?.({ piecesRead: toRead.length, piecesToRead: toRead.length, bytesRead, bytesToRead });
+            config.onProgress?.({ piecesRead: toRead.length, piecesToRead: toRead.length, bytesRead, bytesToRead });
         }
 
-        if (config?.importToTemp) {
-            // A right-sized file we optimistically read in place might still turn
-            // out to be the wrong content (failed verification). Demote it to the
-            // temp copy so the original output is left untouched until the
-            // re-download completes and renames over it.
-            for (const plan of this.filePlans) {
-                if (!plan.finalized || this.fileComplete(plan.file, result)) continue;
-                plan.finalized = false;
-                if (plan.finalSize === undefined) plan.finalSize = plan.file.length;
-                await this.allocate(plan.tempPath, plan.file.length);
-                plan.tempSize = plan.file.length;
+        if (!config.onMismatch) await this.writeCheckedCache(have);
+        return have;
+    }
+
+    // Copy every already-verified piece out of the user's finished output files
+    // into the in-progress temp copy, so a re-download only has to fetch the
+    // missing/corrupt pieces and the original output is left untouched until the
+    // download completes and renames the temp file over it. This is what RESERVES
+    // disk space for a partially-present torrent, so it's deliberately NOT part of
+    // the startup verify: the caller defers it until the torrent is actually about
+    // to download (i.e. it has peers/seeders), so a torrent that never finds a
+    // seeder never reserves space on disk.
+    async importVerifiedToTemp(have: Bitfield, candidates?: Iterable<number>): Promise<void> {
+        if (!this.opened) throw new Error("Storage not open");
+        const toCheck = candidates
+            ? [...candidates]
+            : (this.touchedPieces ? [...this.touchedPieces] : this.meta.pieceHashes.map((_, i) => i));
+        // A right-sized file we optimistically read in place might still turn
+        // out to be the wrong content (failed verification). Demote it to the
+        // temp copy so the original output is left untouched until the
+        // re-download completes and renames over it.
+        for (const plan of this.filePlans) {
+            if (!plan.finalized || this.fileComplete(plan.file, have)) continue;
+            plan.finalized = false;
+            if (plan.finalSize === undefined) plan.finalSize = plan.file.length;
+            await this.allocate(plan.tempPath, plan.file.length);
+            plan.tempSize = plan.file.length;
+        }
+        // The verify pass runs in a worker and keeps no bytes, so every good
+        // piece that now belongs to a demoted (temp-backed) file has its bytes
+        // read here and copied into the temp file. One buffer and one set of
+        // read handles are reused for the whole pass: the handles stay open for
+        // the entire scan and the piece bytes are read straight into the same
+        // buffer, then written out, instead of allocating per piece or holding
+        // every verified piece in memory at once.
+        const buf = Buffer.alloc(this.meta.pieceLength);
+        const handles = new Map<string, Promise<FileHandle | undefined>>();
+        try {
+            for (const i of toCheck) {
+                await yieldIfBlocked();
+                if (!have.get(i)) continue;
+                if (this.plansForPiece(i).every((p) => p.finalized)) continue;
+                const len = pieceLengthAt(this.meta, i);
+                let data: Buffer | undefined;
+                try {
+                    data = await this.readAt({ offset: i * this.meta.pieceLength, length: len, mode: "existing", out: buf, handles });
+                } catch {}
+                if (data) await this.writeAt(i * this.meta.pieceLength, data, "tempOnly");
             }
-            // The verify pass runs in a worker and keeps no bytes, so every good
-            // piece that now belongs to a demoted (temp-backed) file has its bytes
-            // read here and copied into the temp file. One buffer and one set of
-            // read handles are reused for the whole pass: the handles stay open for
-            // the entire scan and the piece bytes are read straight into the same
-            // buffer, then written out, instead of allocating per piece or holding
-            // every verified piece in memory at once.
-            const buf = Buffer.alloc(this.meta.pieceLength);
-            const handles = new Map<string, Promise<FileHandle | undefined>>();
-            try {
-                for (const i of toCheck) {
-                    await yieldIfBlocked();
-                    if (!result.get(i)) continue;
-                    if (this.plansForPiece(i).every((p) => p.finalized)) continue;
-                    const len = pieceLengthAt(this.meta, i);
-                    let data: Buffer | undefined;
-                    try {
-                        data = await this.readAt({ offset: i * this.meta.pieceLength, length: len, mode: "existing", out: buf, handles });
-                    } catch {}
-                    if (data) await this.writeAt(i * this.meta.pieceLength, data, "tempOnly");
-                }
-            } finally {
-                for (const pending of handles.values()) {
-                    const handle = await pending;
-                    if (handle) { try { await handle.close(); } catch {} }
-                }
+        } finally {
+            for (const pending of handles.values()) {
+                const handle = await pending;
+                if (handle) { try { await handle.close(); } catch {} }
             }
         }
+    }
 
-        if (!config?.onMismatch) await this.writeCheckedCache(result);
-        return result;
+    // Convenience wrapper that runs the fast (cache) phase and the slow (hash)
+    // phase back to back, optionally importing verified pieces into the temp copy.
+    // The CLI scheduler instead drives resolveExistingPieces/hashExistingPieces
+    // separately so it can run every torrent's fast phase before any hashing; this
+    // single-call form is for the `check` script and tests.
+    async verifyExistingPieces(
+        candidates?: Iterable<number>,
+        config?: {
+            importToTemp?: boolean;
+            onMismatch?: (info: { index: number; computed: Buffer; expected: Buffer }) => void;
+            onProgress?: (info: { piecesRead: number; piecesToRead: number; bytesRead: number; bytesToRead: number }) => void;
+        },
+    ): Promise<Bitfield> {
+        const resolved = await this.resolveExistingPieces(candidates, { wantMismatch: Boolean(config?.onMismatch) });
+        const have = await this.hashExistingPieces({
+            have: resolved.have,
+            toRead: resolved.toRead,
+            bytesToRead: resolved.bytesToRead,
+            onMismatch: config?.onMismatch,
+            onProgress: config?.onProgress,
+        });
+        if (config?.importToTemp) await this.importVerifiedToTemp(have, candidates);
+        return have;
     }
 
     // FilePlans whose byte range overlaps piece `index`. filePlans are contiguous
