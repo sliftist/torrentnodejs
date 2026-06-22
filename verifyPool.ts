@@ -46,6 +46,21 @@ const { parentPort } = require("worker_threads");
 const crypto = require("crypto");
 const fs = require("fs").promises;
 
+// Each worker has its own V8 inspector. Open it (random high port) and report the
+// raw ws:// URL so the main thread can surface a clickable debugger link per
+// worker — every worker is a different thread you might want to attach to.
+try {
+    const inspector = require("inspector");
+    let dbg = inspector.url();
+    let tries = 0;
+    while (!dbg && tries++ < 100) {
+        const port = 49152 + Math.floor((65535 - 49152) * Math.random());
+        try { inspector.open(port); } catch {}
+        dbg = inspector.url();
+    }
+    if (dbg) parentPort.postMessage({ type: "debug", url: dbg });
+} catch {}
+
 async function readFully(handle, buffer, offset, length, position) {
     let total = 0;
     while (total < length) {
@@ -183,7 +198,8 @@ export interface VerifyProgress {
 type WorkerMessage =
     | { id: number; type: "progress"; piecesRead: number; bytesRead: number }
     | { id: number; type: "done"; verified: Int32Array; mismatches: { index: number; computed: Buffer }[]; bytesRead: number }
-    | { id: number; type: "error"; message: string };
+    | { id: number; type: "error"; message: string }
+    | { type: "debug"; url: string };
 
 // One worker per core verifies one torrent at a time; extra torrents queue.
 // Workers are unref'd while idle so an idle pool never holds the process open,
@@ -193,6 +209,8 @@ export class VerifyPool {
     private readonly idle: Worker[] = [];
     private readonly queue: { id: number; buildJob: BuildJob; pending: Pending }[] = [];
     private readonly pending = new Map<number, Pending>();
+    // Raw ws:// inspector URL each worker reports at startup, in worker order.
+    private readonly inspectorUrls = new Map<Worker, string>();
     private nextId = 0;
     // Per-worker disk-read cap in bytes per second (0 = unlimited), injected into
     // every dispatched job. Set from the global verify scan limit.
@@ -214,6 +232,10 @@ export class VerifyPool {
     }
 
     private onMessage(worker: Worker, msg: WorkerMessage) {
+        if (msg.type === "debug") {
+            this.inspectorUrls.set(worker, msg.url);
+            return;
+        }
         const entry = this.pending.get(msg.id);
         if (msg.type === "progress") {
             entry?.onProgress?.({ piecesRead: msg.piecesRead, bytesRead: msg.bytesRead });
@@ -229,6 +251,18 @@ export class VerifyPool {
             return;
         }
         entry.resolve({ verified: msg.verified, mismatches: msg.mismatches, bytesRead: msg.bytesRead });
+    }
+
+    // Raw ws:// inspector URL for every worker that has reported one, in worker
+    // order. Workers report shortly after construction, so this fills in over the
+    // first moments of the process.
+    workerInspectorUrls(): string[] {
+        const urls: string[] = [];
+        for (const w of this.workers) {
+            const u = this.inspectorUrls.get(w);
+            if (u) urls.push(u);
+        }
+        return urls;
     }
 
     setMaxBytesPerSec(maxBytesPerSec: number): void {

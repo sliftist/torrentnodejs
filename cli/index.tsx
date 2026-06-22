@@ -11,25 +11,8 @@ import { Config, configExists, loadConfig, saveConfig, expandHome, pathExists, p
 import { runFirstRunSetup } from "./setup";
 import { WgTransport } from "./wgTransport";
 import { WebCommandServer } from "./web/webServer";
-
-// Mirrors the debugbreak library: make sure the V8 inspector is listening
-// (opening it on a random high port if it isn't) and build a notdevtools.com
-// URL that attaches Chrome DevTools to this running process — clickable straight
-// into a debugger. The ws:// inspector URL becomes a query param by swapping
-// "://" for "=".
-function inspectorDebugUrl(): string {
-    let url = inspector.url();
-    while (!url) {
-        const port = 49152 + Math.floor((65535 - 49152) * Math.random());
-        try {
-            inspector.open(port);
-        } catch {
-            continue;
-        }
-        url = inspector.url();
-    }
-    return `https://notdevtools.com/devtools/inspector.html?experiments=true&v8only=true&${url.replace("://", "=")}`;
-}
+import { ensureInspectorUrl, formatDebugUrl } from "./debugUrl";
+import { sharedVerifyPool } from "../verifyPool";
 
 async function ingestCopySource(torrentPath: string, copyDest: string | undefined, manager: TorrentManager): Promise<void> {
     // Without a regular source to archive into, just load it in place.
@@ -117,10 +100,16 @@ async function main() {
 
     let debugUrl: string | undefined;
     try {
-        debugUrl = inspectorDebugUrl();
+        debugUrl = formatDebugUrl(ensureInspectorUrl());
     } catch (e) {
         process.stdout.write(`Debugger URL unavailable: ${(e as Error).message}\n`);
     }
+
+    // Spawn the verify workers up front (idle/unref'd until a verify runs) so each
+    // worker opens its inspector and reports a debug URL we can show before any
+    // hashing starts. workerInspectorUrls() fills in over the first moments.
+    sharedVerifyPool();
+    const getWorkerDebugUrls = () => sharedVerifyPool().workerInspectorUrls().map(formatDebugUrl);
 
     const onAddSource = (folder: string) => {
         const resolved = expandHome(folder);
@@ -148,6 +137,7 @@ async function main() {
             webUrl={webUrl}
             webPassword={webPassword}
             debugUrl={debugUrl}
+            getWorkerDebugUrls={getWorkerDebugUrls}
         />,
         { exitOnCtrlC: false },
     );

@@ -20,13 +20,16 @@ export interface AppProps {
     // Connection details for the web-control server, shown via an action.
     webUrl?: string;
     webPassword?: string;
-    // Chrome DevTools URL for attaching a debugger to this process.
+    // Chrome DevTools URL for attaching a debugger to this (main) process.
     debugUrl?: string;
+    // DevTools URLs for each verify worker thread, fetched fresh each render so
+    // workers that report their inspector late still show up.
+    getWorkerDebugUrls?: () => string[];
 }
 
 type View = "list" | "detail";
 // Transient input surfaces drawn over the footer. "none" is the resting state.
-type Overlay = "none" | "actions" | "filter" | "addFolder" | "limits" | "confirmDelete";
+type Overlay = "none" | "actions" | "filter" | "addFolder" | "limits" | "confirmDelete" | "debug";
 
 interface Action {
     label: string;
@@ -64,7 +67,7 @@ const BODY_MARGIN_TOP = 1;
 const CHROME_HEIGHT = HEADER_HEIGHT + FOOTER_HEIGHT + BODY_MARGIN_TOP;
 
 export function App(props: AppProps) {
-    const { manager, watcher, localIP, onAddSource, onSchedulerChange, webUrl, webPassword, debugUrl } = props;
+    const { manager, watcher, localIP, onAddSource, onSchedulerChange, webUrl, webPassword, debugUrl, getWorkerDebugUrls } = props;
     const { exit } = useApp();
     const { stdout } = useStdout();
 
@@ -224,6 +227,7 @@ export function App(props: AppProps) {
         }
         acts.push({ label: "Add folder…", run: () => { setFolderDraft(""); setOverlay("addFolder"); } });
         acts.push({ label: "Options…", run: openLimits });
+        acts.push({ label: "Debug URLs (per thread)…", run: () => setOverlay("debug") });
         if (webUrl && webPassword) {
             acts.push({
                 label: "Show web password",
@@ -316,6 +320,11 @@ export function App(props: AppProps) {
             return;
         }
 
+        if (overlay === "debug") {
+            setOverlay("none");
+            return;
+        }
+
         // Resting state: shared keys first.
         if (input === "a") { setActionIndex(0); setOverlay("actions"); return; }
         if (input === "o") { openLimits(); return; }
@@ -348,8 +357,13 @@ export function App(props: AppProps) {
     // leaving ghosted text. Measure the overlay and shrink the body to match.
     let overlayHeight = 0;
     let limitsVisible = LIMIT_FIELDS.length;
+    // main thread + each worker thread, fetched fresh so late-reporting workers show.
+    const debugLines = overlay === "debug"
+        ? [`main: ${debugUrl || "(not started)"}`, ...(getWorkerDebugUrls?.() ?? []).map((u, i) => `worker ${i}: ${u}`)]
+        : [];
     if (overlay === "actions") overlayHeight = actions.length + 4;
     else if (overlay === "confirmDelete" && pendingDelete) overlayHeight = 6;
+    else if (overlay === "debug") overlayHeight = debugLines.length + 4;
     else if (overlay === "limits") {
         limitsVisible = Math.max(3, Math.min(LIMIT_FIELDS.length, dims.rows - CHROME_HEIGHT - 7));
         overlayHeight = limitsVisible + 6;
@@ -371,6 +385,7 @@ export function App(props: AppProps) {
                 {body}
             </Box>
             {overlay === "actions" && <ActionsMenu actions={actions} index={actionIndex} />}
+            {overlay === "debug" && <DebugMenu lines={debugLines} width={width} />}
             {overlay === "limits" && <LimitsEditor draft={limitsDraft} index={limitIndex} maxVisible={limitsVisible} />}
             {overlay === "confirmDelete" && pendingDelete && <ConfirmDelete name={pendingDelete.name} width={width} />}
             <Footer
@@ -404,6 +419,20 @@ function ActionsMenu(props: { actions: Action[]; index: number }) {
                 );
             })}
             <Text dimColor>↑↓ select · Enter run · Esc close</Text>
+        </Box>
+    );
+}
+
+function DebugMenu(props: { lines: string[]; width: number }) {
+    const { lines, width } = props;
+    const boxWidth = Math.min(width, 120);
+    return (
+        <Box flexDirection="column" width={boxWidth} borderStyle="round" borderColor="magenta" paddingX={1}>
+            <Text bold color="magenta">Debugger URLs (attach Chrome DevTools per thread)</Text>
+            {lines.map((line, i) => (
+                <Text key={i} color="magenta">{truncate(line, boxWidth - 4)}</Text>
+            ))}
+            <Text dimColor>any key close</Text>
         </Box>
     );
 }
