@@ -3,7 +3,7 @@ import crypto from "crypto";
 import os from "os";
 import path from "path";
 import { mkdtemp, rm, stat, writeFile, utimes, open as fsOpen } from "fs/promises";
-import { Storage } from "../storage";
+import { Storage, diskIO } from "../storage";
 import { Bitfield } from "../bitfield";
 import { TorrentMeta } from "../torrentFile";
 
@@ -125,8 +125,12 @@ export async function runStorageTests() {
     try {
         const sNone = new Storage(meta, missingDir);
         await sNone.open();
+        // open() pre-allocates the (sparse, all-zero) temp file. Verify must not
+        // read a single byte of it — a freshly-allocated temp isn't real data.
+        const readsBefore = diskIO.bytesRead;
         const none = await sNone.verifyExistingPieces();
         assert.strictEqual(none.popcount(), 0, "no on-disk file → no pieces verify");
+        assert.strictEqual(diskIO.bytesRead, readsBefore, "verify reads nothing when only a freshly-allocated temp exists");
         await sNone.close();
 
         // Only the first piece's worth of bytes exists; the rest is absent.

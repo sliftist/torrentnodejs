@@ -85,6 +85,10 @@ export interface TorrentView {
     rangeFinished: number;
     rangeChunksRequested: number;
     rangeChunksReturned: number;
+    // Live disk-scan progress while a verify is running: pieces hashed vs. the
+    // pieces that actually need hashing (0/0 when not verifying).
+    verifyPiecesRead: number;
+    verifyPiecesToRead: number;
 }
 
 // The four lists from the spec.
@@ -915,6 +919,8 @@ export class TorrentManager extends EventEmitter {
             rangeFinished: this.rangeStats.get(m.infoHash)?.finished ?? 0,
             rangeChunksRequested: this.rangeStats.get(m.infoHash)?.chunksRequested ?? 0,
             rangeChunksReturned: this.rangeStats.get(m.infoHash)?.chunksReturned ?? 0,
+            verifyPiecesRead: m.torrent?.verifyProgress?.piecesRead ?? 0,
+            verifyPiecesToRead: m.torrent?.verifyProgress?.piecesToRead ?? 0,
         };
     }
 

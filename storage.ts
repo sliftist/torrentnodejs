@@ -137,17 +137,17 @@ export class Storage {
                 plan.finalized = true;
                 continue;
             }
+            // Stat the temp file BEFORE allocating: only a temp file that
+            // already existed (a partial download from a previous run) can hold
+            // real data worth verifying. The file we're about to allocate is
+            // freshly pre-allocated all-zeros, so it must not be treated as a
+            // backing source — otherwise a scan would hash terabytes of zeros
+            // for torrents whose data isn't on disk yet.
+            const tempStat = await stat(tempPath).catch(() => undefined);
             await this.allocate(tempPath, f.length);
-            // With no final output file, the temp copy we just ensured backs
-            // reads; record its stat so a repeat scan trusts it from the cache.
-            // (When a final file exists, existingSource prefers it, so the temp
-            // stat would be unused — skip it.)
-            if (!finalStat) {
-                const tempStat = await stat(tempPath).catch(() => undefined);
-                if (tempStat) {
-                    plan.existingTempSize = tempStat.size;
-                    plan.existingTempMtimeMs = tempStat.mtimeMs;
-                }
+            if (!finalStat && tempStat) {
+                plan.existingTempSize = tempStat.size;
+                plan.existingTempMtimeMs = tempStat.mtimeMs;
             }
         }
     }
@@ -202,7 +202,15 @@ export class Storage {
         // onMismatch reports every piece whose on-disk bytes don't hash to the
         // expected value (a diagnostic for the `check` script); supplying it
         // also forces a full re-hash, bypassing the cache entirely.
-        config?: { importToTemp?: boolean; onMismatch?: (info: { index: number; computed: Buffer; expected: Buffer }) => void },
+        // onProgress reports how many of the pieces that actually need reading
+        // have been hashed so far (cache-trusted and unbacked pieces are
+        // instant, so they're excluded from the total) — used to show live scan
+        // progress for the slow, disk-bound part of a verify.
+        config?: {
+            importToTemp?: boolean;
+            onMismatch?: (info: { index: number; computed: Buffer; expected: Buffer }) => void;
+            onProgress?: (info: { piecesRead: number; piecesToRead: number }) => void;
+        },
     ): Promise<Bitfield> {
         if (!this.opened) throw new Error("Storage not open");
 
@@ -265,6 +273,8 @@ export class Storage {
             const lastEnd = run[run.length - 1] * this.meta.pieceLength + pieceLengthAt(this.meta, run[run.length - 1]);
             return this.readAt(startOffset, lastEnd - startOffset, "existing", handles).catch(() => undefined);
         };
+        let piecesRead = 0;
+        config?.onProgress?.({ piecesRead, piecesToRead: toRead.length });
         try {
             // One run read-ahead: while the CPU hashes run r, the disk streams the
             // next (sequentially adjacent) run, so I/O and hashing overlap without
@@ -273,7 +283,11 @@ export class Storage {
             for (let r = 0; r < runs.length; r++) {
                 const buf = await prefetch;
                 prefetch = r + 1 < runs.length ? readRun(runs[r + 1]) : undefined;
-                if (!buf) continue;
+                if (!buf) {
+                    piecesRead += runs[r].length;
+                    config?.onProgress?.({ piecesRead, piecesToRead: toRead.length });
+                    continue;
+                }
                 const run = runs[r];
                 const base = run[0] * this.meta.pieceLength;
                 for (const i of run) {
@@ -287,6 +301,8 @@ export class Storage {
                     result.set(i);
                     if (keepData) valid.push({ index: i, data: Buffer.from(slice) });
                 }
+                piecesRead += run.length;
+                config?.onProgress?.({ piecesRead, piecesToRead: toRead.length });
             }
         } finally {
             for (const pending of handles.values()) {
@@ -491,6 +507,13 @@ export class Storage {
                 diskIO.bytesWritten += sliceLength;
             } finally {
                 await handle.close();
+            }
+            // Writing real bytes into the temp copy makes it a backing source for
+            // later existing-reads/verify. A temp file we merely pre-allocated
+            // (all zeros) is deliberately left out of existingSource so a scan
+            // doesn't hash gigabytes of zeros for data that isn't on disk yet.
+            if (!plan.finalized && plan.existingTempSize === undefined) {
+                plan.existingTempSize = plan.file.length;
             }
         }
     }

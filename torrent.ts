@@ -99,6 +99,11 @@ export class Torrent extends EventEmitter {
     private startedAt = 0;
     private stopped = false;
     private uploadedBytesField = 0;
+    // Live progress of the disk-bound verify pass: how many pieces that needed
+    // hashing have been hashed so far. undefined once verification is done (or
+    // never ran), so the UI only shows scan progress while it's actually
+    // happening.
+    private verifyProgressField: { piecesRead: number; piecesToRead: number } | undefined;
     private readonly options: TorrentOptions;
 
     constructor(config: {
@@ -232,6 +237,7 @@ export class Torrent extends EventEmitter {
 
     get hasMismatchedOutput(): boolean { return this.storage.hasMismatchedOutput(this.pieceManager.haveBitfield); }
     get verifyTarget(): "output" | "temp" { return this.storage.verifyTarget; }
+    get verifyProgress() { return this.verifyProgressField; }
     get trackerStats() { return this.tracker.trackerStats; }
     get pieceStates() { return this.pieceManager.pieceStates(); }
     get pieceCounts() { return this.pieceManager.pieceCounts; }
@@ -249,7 +255,12 @@ export class Torrent extends EventEmitter {
         } else if (this.options.verifyExisting) {
             // Only a real download (full mode) seeds the temp file from salvaged
             // output; a scan just reports what's actually on disk.
-            const have = await this.storage.verifyExistingPieces(this.pieceManager.selected, { importToTemp: mode === "full" });
+            this.verifyProgressField = { piecesRead: 0, piecesToRead: 0 };
+            const have = await this.storage.verifyExistingPieces(this.pieceManager.selected, {
+                importToTemp: mode === "full",
+                onProgress: (p) => { this.verifyProgressField = p; },
+            });
+            this.verifyProgressField = undefined;
             this.pieceManager.markHaves(have);
             await this.storage.finalizeFiles(this.pieceManager.haveBitfield);
             if (this.pieceManager.isComplete()) this.emit("complete");
