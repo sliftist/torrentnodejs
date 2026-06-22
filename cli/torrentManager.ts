@@ -25,6 +25,11 @@ const SEED_ACTIVE_WINDOW_MS = 60 * 1000;
 // 1 megabit per second = 125000 bytes per second.
 const BYTES_PER_MBIT = 125000;
 const CHOKE_INTERVAL_MS = 10 * 1000;
+// While streaming a file over HTTP, prioritize this many bytes ahead of the
+// piece currently being read out. Big enough to keep every peer busy on the
+// stream's upcoming pieces (in order) rather than fanning out to scattered
+// rarest-first pieces, which would stall in-order playback.
+const STREAM_READAHEAD_BYTES = 32 * 1024 * 1024;
 
 export type TorrentState =
     | "queued"
@@ -529,14 +534,20 @@ export class TorrentManager extends EventEmitter {
         this.applyBandwidthSplit();
         this.emit("update");
 
+        const readaheadPieces = Math.max(1, Math.ceil(STREAM_READAHEAD_BYTES / pieceLen));
         try {
             const t = await this.ensureStartedTorrent(m);
             this.applyLimiter(m);
             for (let p = firstPiece; p <= lastPiece; p++) {
                 if (isAborted()) return;
-                // Re-assert priority each step so a long stream keeps its lead as
-                // the picker advances past already-fetched pieces.
-                t.pieceManager.prioritizePiece(p);
+                // Prioritize a window of upcoming pieces, not just the one we're
+                // about to read. The picker fetches priority pieces earliest-first,
+                // so spare peer capacity prefetches the stream's next pieces in
+                // order instead of scattering across rarest-first pieces — keeping
+                // playback from stalling. Re-asserted each step so the window slides
+                // forward as the read position advances.
+                const windowEnd = Math.min(lastPiece, p + readaheadPieces);
+                for (let w = p; w <= windowEnd; w++) t.pieceManager.prioritizePiece(w);
                 this.runScheduler(Date.now());
                 t.kickRequests();
                 if (!t.pieceManager.haveBitfield.get(p)) await this.waitForPiece(t, p);
