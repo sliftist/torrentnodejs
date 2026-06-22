@@ -1,7 +1,7 @@
 import { EventEmitter } from "events";
 import crypto from "crypto";
 import path from "path";
-import { readFile, writeFile, stat } from "fs/promises";
+import { readFile, writeFile, stat, rm, rmdir } from "fs/promises";
 import { Transport } from "../transport";
 import { Torrent, RunMode } from "../torrent";
 import { TorrentMeta, parseTorrentFile, pieceLengthAt } from "../torrentFile";
@@ -410,6 +410,47 @@ export class TorrentManager extends EventEmitter {
             await m.torrent?.stop().catch(() => {});
             this.torrents.delete(infoHash);
         }
+        this.emit("update");
+    }
+
+    // Permanently remove a torrent: stop it, delete its source .torrent file(s)
+    // so the watcher can't re-add it, delete its downloaded data, and forget all
+    // its bookkeeping. Irreversible — the UI confirms before calling this.
+    async deleteTorrent(infoHash: string): Promise<void> {
+        const m = this.torrents.get(infoHash);
+        if (!m) return;
+        await m.torrent?.stop().catch(() => {});
+
+        for (const [source, hash] of [...this.bySource.entries()]) {
+            if (hash !== infoHash) continue;
+            this.bySource.delete(source);
+            await rm(source, { force: true }).catch(() => {});
+        }
+
+        const dirs = new Set<string>();
+        for (const f of m.meta.files) {
+            const full = path.join(this.downloadDir, ...f.path);
+            await rm(full, { force: true }).catch(() => {});
+            let dir = path.dirname(full);
+            while (dir.length > this.downloadDir.length && dir.startsWith(this.downloadDir)) {
+                dirs.add(dir);
+                dir = path.dirname(dir);
+            }
+        }
+        // Deepest first so a parent only gets pruned after its children. rmdir
+        // throws on a non-empty dir, which we ignore — shared dirs stay put.
+        for (const dir of [...dirs].sort((a, b) => b.length - a.length)) {
+            await rmdir(dir).catch(() => {});
+        }
+
+        this.torrents.delete(infoHash);
+        this.prioritized.delete(infoHash);
+        this.forcedSlots.delete(infoHash);
+        this.streamPriority.delete(infoHash);
+        this.rangeStats.delete(infoHash);
+        this.pausedPersisted.delete(infoHash);
+        await this.saveState();
+        this.emit("notice", `Deleted ${m.name}`);
         this.emit("update");
     }
 

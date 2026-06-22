@@ -1,7 +1,8 @@
 import assert from "assert";
 import os from "os";
 import path from "path";
-import { mkdtemp, copyFile, rm, readdir } from "fs/promises";
+import { mkdtemp, copyFile, rm, readdir, mkdir, writeFile } from "fs/promises";
+import { existsSync } from "fs";
 import { Duplex } from "stream";
 import { Transport, UdpSocketLike, TcpListenerLike } from "../transport";
 import { EventEmitter } from "events";
@@ -29,7 +30,6 @@ async function main() {
     const sourceDir = path.join(work, "src");
     const downloadDir = path.join(work, "dl");
     await rm(sourceDir, { recursive: true, force: true });
-    const { mkdir } = await import("fs/promises");
     await mkdir(sourceDir, { recursive: true });
     await mkdir(downloadDir, { recursive: true });
 
@@ -153,6 +153,22 @@ async function main() {
     assert.strictEqual(views.length, 1, `expected 1 torrent from copy source, got ${views.length}`);
     console.log("copy source archived + loaded the torrent");
     copyWatcher.stop();
+
+    // --- delete: stage a fake data file, then deleteTorrent should remove the
+    // data, the source .torrent, and drop the torrent from the manager. ---
+    const delHash = manager.views()[0].infoHash;
+    const firstFile = manager.torrentFiles(delHash)[0];
+    const dataPath = path.join(downloadDir, firstFile.path);
+    await mkdir(path.dirname(dataPath), { recursive: true });
+    await writeFile(dataPath, "x");
+    const archivedSource = path.join(sourceDir, "bbb.torrent");
+    assert.ok(existsSync(dataPath), "data file staged");
+    assert.ok(existsSync(archivedSource), "source .torrent present before delete");
+    await manager.deleteTorrent(delHash);
+    assert.ok(!existsSync(dataPath), "data file removed after delete");
+    assert.ok(!existsSync(archivedSource), "source .torrent removed after delete");
+    assert.strictEqual(manager.views().length, 0, "torrent dropped after delete");
+    console.log("delete removed data + .torrent and dropped the torrent");
 
     watcher.stop();
     await manager.stop();

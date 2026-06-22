@@ -24,7 +24,7 @@ export interface AppProps {
 
 type View = "list" | "detail";
 // Transient input surfaces drawn over the footer. "none" is the resting state.
-type Overlay = "none" | "actions" | "filter" | "addFolder" | "limits";
+type Overlay = "none" | "actions" | "filter" | "addFolder" | "limits" | "confirmDelete";
 
 interface Action {
     label: string;
@@ -76,6 +76,7 @@ export function App(props: AppProps) {
     const [actionIndex, setActionIndex] = useState(0);
     const [selectedIndex, setSelectedIndex] = useState(0);
     const [selectedHash, setSelectedHash] = useState<string | undefined>(undefined);
+    const [pendingDelete, setPendingDelete] = useState<TorrentView | undefined>(undefined);
     const [tab, setTab] = useState<DetailTab>("general");
     const [scroll, setScroll] = useState(0);
     const [notice, setNotice] = useState<string>("");
@@ -189,6 +190,10 @@ export function App(props: AppProps) {
                 label: prioritized && "Unprioritize" || "Prioritize (web)",
                 run: () => { setOverlay("none"); manager.setPriority(f.infoHash, !prioritized); },
             });
+            acts.push({
+                label: "Delete (data + .torrent)",
+                run: () => { setPendingDelete(f); setOverlay("confirmDelete"); },
+            });
         }
         acts.push({ label: "Add folder…", run: () => { setFolderDraft(""); setOverlay("addFolder"); } });
         acts.push({ label: "Edit limits…", run: openLimits });
@@ -262,6 +267,20 @@ export function App(props: AppProps) {
             return;
         }
 
+        if (overlay === "confirmDelete") {
+            if (input === "y" && pendingDelete) {
+                const target = pendingDelete;
+                setPendingDelete(undefined);
+                setOverlay("none");
+                if (view === "detail") { setView("list"); setScroll(0); }
+                void manager.deleteTorrent(target.infoHash);
+                return;
+            }
+            setPendingDelete(undefined);
+            setOverlay("none");
+            return;
+        }
+
         if (overlay === "actions") {
             if (key.escape || key.leftArrow) { setOverlay("none"); return; }
             if (key.upArrow) { setActionIndex((i) => Math.max(0, i - 1)); return; }
@@ -312,6 +331,7 @@ export function App(props: AppProps) {
             </Box>
             {overlay === "actions" && <ActionsMenu actions={actions} index={actionIndex} />}
             {overlay === "limits" && <LimitsEditor draft={limitsDraft} index={limitIndex} />}
+            {overlay === "confirmDelete" && pendingDelete && <ConfirmDelete name={pendingDelete.name} width={width} />}
             <Footer
                 width={width}
                 view={view}
@@ -341,6 +361,18 @@ function ActionsMenu(props: { actions: Action[]; index: number }) {
                 );
             })}
             <Text dimColor>↑↓ select · Enter run · Esc close</Text>
+        </Box>
+    );
+}
+
+function ConfirmDelete(props: { name: string; width: number }) {
+    const { name, width } = props;
+    return (
+        <Box flexDirection="column" width={Math.min(width, 60)} borderStyle="round" borderColor="red" paddingX={1}>
+            <Text bold color="red">Delete torrent</Text>
+            <Text>{truncate(name, Math.min(width, 60) - 4)}</Text>
+            <Text dimColor>Removes downloaded data AND the .torrent file.</Text>
+            <Text dimColor>y confirm · any other key cancel</Text>
         </Box>
     );
 }
