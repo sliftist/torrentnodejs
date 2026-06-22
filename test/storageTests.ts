@@ -2,7 +2,7 @@ import assert from "assert";
 import crypto from "crypto";
 import os from "os";
 import path from "path";
-import { mkdtemp, rm, stat, writeFile, utimes, open as fsOpen } from "fs/promises";
+import { mkdtemp, rm, stat, writeFile, utimes, mkdir, open as fsOpen } from "fs/promises";
 import { Storage, diskIO } from "../storage";
 import { Bitfield } from "../bitfield";
 import { TorrentMeta } from "../torrentFile";
@@ -275,15 +275,20 @@ export async function runStorageTests() {
             pieceLength,
             pieceHashes,
             files: [
-                { path: ["a.bin"], length: fileLen, offsetInTorrent: 0 },
-                { path: ["b.bin"], length: fileLen, offsetInTorrent: fileLen },
+                { path: ["multi", "a.bin"], length: fileLen, offsetInTorrent: 0 },
+                { path: ["multi", "b.bin"], length: fileLen, offsetInTorrent: fileLen },
             ],
             totalLength: fileLen * 2,
             isPrivate: false,
             announceList: [],
         };
-        const aPath = path.join(multiDir, "a.bin");
-        const bPath = path.join(multiDir, "b.bin");
+        // Real torrents always nest files under a folder named for the torrent
+        // (the parser prefixes info.name); the content-root existence check
+        // relies on that, so lay the fixture out the same way.
+        const contentRoot = path.join(multiDir, "multi");
+        await mkdir(contentRoot, { recursive: true });
+        const aPath = path.join(contentRoot, "a.bin");
+        const bPath = path.join(contentRoot, "b.bin");
         await writeFile(aPath, dataA);
         await writeFile(bPath, dataB);
         const fixed = new Date(Math.floor(Date.now() / 1000) * 1000);

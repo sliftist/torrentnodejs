@@ -152,8 +152,15 @@ export class Storage {
         if (!this.opened) throw new Error("Storage not open");
         if (this.scanned) return;
         this.scanned = true;
+        // Don't stat files under a top-level directory that isn't there: a
+        // torrent never downloaded has no temp dir, and one not yet written to
+        // the save dir has no content root. Every per-file stat under a missing
+        // dir is a guaranteed ENOENT, so for a many-file torrent these two
+        // checks replace hundreds of thousands of pointless syscalls.
+        const contentExists = await pathExists(path.join(this.saveDir, this.meta.name));
+        const tempExists = await pathExists(this.incompleteDir());
         const statPlan = async (plan: FilePlan) => {
-            const finalStat = await tryStat(plan.finalPath);
+            const finalStat = contentExists && await tryStat(plan.finalPath) || undefined;
             if (finalStat) {
                 plan.finalSize = finalStat.size;
                 plan.finalMtimeMs = finalStat.mtimeMs;
@@ -164,6 +171,9 @@ export class Storage {
                 plan.finalized = true;
                 return;
             }
+            // No temp dir means nothing was ever downloaded here, so skip the
+            // per-file temp stats entirely.
+            if (!tempExists) return;
             // Pick up a partial temp file left by a previous run so a resumed
             // download verifies its existing progress.
             const tempStat = await tryStat(plan.tempPath);
