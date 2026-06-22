@@ -9,7 +9,7 @@
         "cli": "typenode ./cli/index.tsx",
         "scan": "typenode ./cli/index.tsx scan",
         "scrape": "typenode ./cli/index.tsx scrape",
-        "check": "typenode ./scripts/checkTorrents.ts",
+        "c": "typenode ./scripts/checkTorrents.ts",
         "cli-smoke": "typenode ./cli/smokeTest.ts",
         "web-smoke": "typenode ./scripts/webServerSmoke.ts",
         "fetch-corpus": "typenode ./scripts/fetchCorpus.ts",

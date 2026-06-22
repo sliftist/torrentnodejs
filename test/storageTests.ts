@@ -160,5 +160,71 @@ export async function runStorageTests() {
         await rm(cacheDir, { recursive: true, force: true });
     }
 
+    // Per-file cache granularity: when one file in a multi-file torrent changes,
+    // only that file's pieces re-hash; an unchanged file's pieces stay trusted
+    // from the cache (proven by secretly corrupting the unchanged file's bytes
+    // while keeping its size+mtime — those pieces still report valid because they
+    // were never re-read).
+    const multiDir = await mkdtemp(path.join(os.tmpdir(), "bt-storage-multi-"));
+    try {
+        const fileLen = pieceLength * 2;
+        const dataA = crypto.randomBytes(fileLen);
+        const dataB = crypto.randomBytes(fileLen);
+        const full = Buffer.concat([dataA, dataB]);
+        const pieceHashes: Buffer[] = [];
+        for (let i = 0; i < 4; i++) {
+            pieceHashes.push(crypto.createHash("sha1").update(full.subarray(i * pieceLength, (i + 1) * pieceLength)).digest());
+        }
+        const multiMeta: TorrentMeta = {
+            infoHash: Buffer.alloc(20, 7),
+            name: "multi",
+            pieceLength,
+            pieceHashes,
+            files: [
+                { path: ["a.bin"], length: fileLen, offsetInTorrent: 0 },
+                { path: ["b.bin"], length: fileLen, offsetInTorrent: fileLen },
+            ],
+            totalLength: fileLen * 2,
+            isPrivate: false,
+            announceList: [],
+        };
+        const aPath = path.join(multiDir, "a.bin");
+        const bPath = path.join(multiDir, "b.bin");
+        await writeFile(aPath, dataA);
+        await writeFile(bPath, dataB);
+        const fixed = new Date(Math.floor(Date.now() / 1000) * 1000);
+        await utimes(aPath, fixed, fixed);
+        await utimes(bPath, fixed, fixed);
+
+        const sm1 = new Storage(multiMeta, multiDir);
+        await sm1.open();
+        assert.strictEqual((await sm1.verifyExistingPieces()).popcount(), 4, "all four pieces verify and cache");
+        await sm1.close();
+
+        // Corrupt a.bin in place but keep its size+mtime → its pieces (0,1) must
+        // stay trusted. Corrupt b.bin AND bump its mtime → its pieces (2,3) must
+        // re-hash and fail.
+        const ha = await fsOpen(aPath, "r+");
+        await ha.write(Buffer.alloc(300, 0xff), 0, 300, 0);
+        await ha.close();
+        await utimes(aPath, fixed, fixed);
+
+        const hb = await fsOpen(bPath, "r+");
+        await hb.write(Buffer.alloc(300, 0xff), 0, 300, 0);
+        await hb.close();
+        const later = new Date(fixed.getTime() + 5000);
+        await utimes(bPath, later, later);
+
+        const sm2 = new Storage(multiMeta, multiDir);
+        await sm2.open();
+        const got = await sm2.verifyExistingPieces();
+        assert.ok(got.get(0) && got.get(1), "unchanged file's pieces trusted from cache despite corruption (not re-hashed)");
+        assert.ok(!got.get(2), "changed file re-hashed: its corrupt first piece is caught");
+        assert.ok(got.get(3), "changed file re-hashed: its intact second piece still verifies");
+        await sm2.close();
+    } finally {
+        await rm(multiDir, { recursive: true, force: true });
+    }
+
     console.log("Storage tests passed.");
 }

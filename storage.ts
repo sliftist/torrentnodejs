@@ -169,24 +169,29 @@ export class Storage {
     ): Promise<Bitfield> {
         if (!this.opened) throw new Error("Storage not open");
 
-        // Fast path for a pure scan (no temp import): if every output file is
-        // present and unchanged since the last verify, trust the cached result
-        // rather than re-hashing potentially gigabytes off disk.
-        const signature = this.cacheSignature();
-        if (!config?.importToTemp && !config?.onMismatch && signature) {
-            const cached = await this.loadCheckedCache();
-            if (cached && this.cacheMatches(cached, signature)) {
-                return new Bitfield(this.meta.pieceHashes.length, Buffer.from(cached.have, "base64"));
-            }
-        }
-
         const result = new Bitfield(this.meta.pieceHashes.length);
         const toCheck = candidates
             ? [...candidates]
             : (this.touchedPieces ? [...this.touchedPieces] : this.meta.pieceHashes.map((_, i) => i));
+
+        // Per-file (size+mtime) → verified-piece cache. A piece is trusted from
+        // the cache only when every file it overlaps is still present at the
+        // same size and mtime, so a single changed/corrupt/missing file forces a
+        // re-hash of just its own pieces rather than the whole torrent — and
+        // unchanged files (including ones whose pieces are known-bad) are never
+        // re-hashed on later startups. The diagnostic `check` path ignores the
+        // cache so it always reads and reports real on-disk state.
+        const cached = config?.onMismatch ? undefined : await this.loadCheckedCache();
+        const cachedHave = cached && cached.pieceCount === this.meta.pieceHashes.length
+            && new Bitfield(this.meta.pieceHashes.length, Buffer.from(cached.have, "base64"));
+
         const valid: { index: number; data: Buffer }[] = [];
         for (const i of toCheck) {
             if (i < 0 || i >= this.meta.pieceHashes.length) continue;
+            if (cachedHave && cached && this.pieceUnchanged(i, cached)) {
+                if (cachedHave.get(i)) result.set(i);
+                continue; // trust the cached result; no read, no hash
+            }
             let data: Buffer;
             try {
                 data = await this.readAt(i * this.meta.pieceLength, pieceLengthAt(this.meta, i), "existing");
@@ -214,13 +219,47 @@ export class Storage {
                 if (plan.existingFinalSize === undefined) plan.existingFinalSize = plan.file.length;
                 await this.allocate(plan.tempPath, plan.file.length);
             }
+            // Pieces trusted from the cache weren't read above; any that are good
+            // and now belong to a demoted (temp-backed) file still need their
+            // bytes copied into the temp file, so read just those on demand.
+            const haveData = new Set(valid.map((v) => v.index));
+            for (const i of toCheck) {
+                if (!result.get(i) || haveData.has(i)) continue;
+                if (this.plansForPiece(i).every((p) => p.finalized)) continue;
+                const data = await this.readAt(i * this.meta.pieceLength, pieceLengthAt(this.meta, i), "existing").catch(() => undefined);
+                if (data) valid.push({ index: i, data });
+            }
             for (const { index, data } of valid) {
                 await this.writeAt(index * this.meta.pieceLength, data, "tempOnly");
             }
         }
 
-        if (signature && !config?.onMismatch) await this.writeCheckedCache(result, signature);
+        if (!config?.onMismatch) await this.writeCheckedCache(result);
         return result;
+    }
+
+    // FilePlans whose byte range overlaps piece `index`.
+    private plansForPiece(index: number): FilePlan[] {
+        const start = index * this.meta.pieceLength;
+        const end = start + pieceLengthAt(this.meta, index);
+        const out: FilePlan[] = [];
+        for (const plan of this.filePlans) {
+            const fEnd = plan.file.offsetInTorrent + plan.file.length;
+            if (start < fEnd && end > plan.file.offsetInTorrent) out.push(plan);
+        }
+        return out;
+    }
+
+    // A piece can be trusted from the cache only when every file feeding it is
+    // present on disk at exactly the size and mtime recorded when it was hashed.
+    private pieceUnchanged(index: number, cached: CheckedCache): boolean {
+        for (const plan of this.plansForPiece(index)) {
+            if (plan.file.length === 0) continue;
+            if (plan.existingFinalSize === undefined || plan.existingFinalMtimeMs === undefined) return false;
+            const c = cached.files[plan.file.path.join("/")];
+            if (!c || c.size !== plan.existingFinalSize || c.mtimeMs !== plan.existingFinalMtimeMs) return false;
+        }
+        return true;
     }
 
     // True when an output file is physically on disk but isn't a clean, complete
@@ -230,42 +269,33 @@ export class Storage {
         return this.filePlans.some((p) => p.existingFinalSize !== undefined && !p.finalized);
     }
 
-    // Signature of the output files for the checked cache, but only when every
-    // touched file is physically present on disk. If anything is missing (a
-    // fresh download, or output we can only resume from temp) there's nothing
-    // stable to cache, so we return undefined and always re-hash.
-    private cacheSignature(): Record<string, { size: number; mtimeMs: number }> | undefined {
-        const touched = this.computeTouchedFiles();
-        const files: Record<string, { size: number; mtimeMs: number }> = {};
-        for (const plan of this.filePlans) {
-            if (!touched.has(plan.file)) continue;
-            if (plan.existingFinalSize === undefined || plan.existingFinalMtimeMs === undefined) return undefined;
-            files[plan.file.path.join("/")] = { size: plan.existingFinalSize, mtimeMs: plan.existingFinalMtimeMs };
-        }
-        return files;
-    }
-
-    private cacheMatches(cached: CheckedCache, signature: Record<string, { size: number; mtimeMs: number }>): boolean {
-        if (cached.version !== CHECKED_CACHE_VERSION) return false;
-        if (cached.pieceCount !== this.meta.pieceHashes.length) return false;
-        return JSON.stringify(cached.files) === JSON.stringify(signature);
-    }
-
     private async loadCheckedCache(): Promise<CheckedCache | undefined> {
         const raw = await readFile(this.checkedCachePath(), "utf8").catch(() => undefined);
         if (!raw) return undefined;
         try {
-            return JSON.parse(raw) as CheckedCache;
+            const parsed = JSON.parse(raw) as CheckedCache;
+            if (parsed.version !== CHECKED_CACHE_VERSION) return undefined;
+            return parsed;
         } catch {
             return undefined;
         }
     }
 
-    private async writeCheckedCache(have: Bitfield, signature: Record<string, { size: number; mtimeMs: number }>): Promise<void> {
+    // Records every touched file that's physically present (size+mtime) alongside
+    // the verified-piece bitfield. Missing files are simply omitted, so their
+    // pieces re-hash next time while present files stay cached.
+    private async writeCheckedCache(have: Bitfield): Promise<void> {
+        const touched = this.computeTouchedFiles();
+        const files: Record<string, { size: number; mtimeMs: number }> = {};
+        for (const plan of this.filePlans) {
+            if (!touched.has(plan.file)) continue;
+            if (plan.existingFinalSize === undefined || plan.existingFinalMtimeMs === undefined) continue;
+            files[plan.file.path.join("/")] = { size: plan.existingFinalSize, mtimeMs: plan.existingFinalMtimeMs };
+        }
         const cache: CheckedCache = {
             version: CHECKED_CACHE_VERSION,
             pieceCount: this.meta.pieceHashes.length,
-            files: signature,
+            files,
             have: Buffer.from(have.bytes).toString("base64"),
         };
         await mkdir(path.join(this.saveDir, CHECKED_CACHE_DIR), { recursive: true });
