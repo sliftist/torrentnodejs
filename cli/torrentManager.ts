@@ -221,6 +221,10 @@ export class TorrentManager extends EventEmitter {
     // Torrents with an in-flight web block request: infoHash -> pending count.
     // While pending they're guaranteed a slot (but don't get the bandwidth split).
     private readonly forcedSlots = new Map<string, number>();
+    // Active *prioritized* file streams per infoHash: bounded-range HTTP requests
+    // only. Whole-file requests (no Range / bytes=0-) stream at normal priority,
+    // so they're excluded here and don't keep the torrent's priority alive.
+    private readonly streamPriority = new Map<string, number>();
     // HTTP file-serving range requests the browser made: infoHash -> counters.
     // `outstanding`/`finished` count whole Range requests (streaming now vs.
     // done); `chunksRequested`/`chunksReturned` count the individual chunks those
@@ -530,15 +534,24 @@ export class TorrentManager extends EventEmitter {
         const firstPiece = Math.floor(absStart / pieceLen);
         const lastPiece = Math.floor((absEnd - 1) / pieceLen);
 
+        // A whole-file request (no Range header, or `bytes=0-`) is the browser
+        // pulling the entire file, not seeking — prioritizing it would just
+        // overload the scheduler with the whole file at once. Only bounded ranges
+        // (a real seek/window) get prioritized; whole-file requests still stream,
+        // just at normal priority.
+        const prioritize = !(start === 0 && endExclusive === file.length);
+
         const stats = this.rangeStats.get(infoHash) || { outstanding: 0, finished: 0, chunksRequested: 0, chunksReturned: 0 };
         stats.outstanding++;
         // Every covered piece is one chunk this range request will hand back.
         stats.chunksRequested += lastPiece - firstPiece + 1;
         this.rangeStats.set(infoHash, stats);
-        this.forcedSlots.set(infoHash, (this.forcedSlots.get(infoHash) || 0) + 1);
-        // Streaming a file means the user wants it now: prioritize the torrent.
-        this.prioritized.add(infoHash);
-        this.applyBandwidthSplit();
+        if (prioritize) {
+            this.forcedSlots.set(infoHash, (this.forcedSlots.get(infoHash) || 0) + 1);
+            this.streamPriority.set(infoHash, (this.streamPriority.get(infoHash) || 0) + 1);
+            this.prioritized.add(infoHash);
+            this.applyBandwidthSplit();
+        }
         this.emit("update");
 
         const readaheadPieces = Math.max(1, Math.ceil(STREAM_READAHEAD_BYTES / pieceLen));
@@ -553,8 +566,10 @@ export class TorrentManager extends EventEmitter {
                 // order instead of scattering across rarest-first pieces — keeping
                 // playback from stalling. Re-asserted each step so the window slides
                 // forward as the read position advances.
-                const windowEnd = Math.min(lastPiece, p + readaheadPieces);
-                for (let w = p; w <= windowEnd; w++) t.pieceManager.prioritizePiece(w);
+                if (prioritize) {
+                    const windowEnd = Math.min(lastPiece, p + readaheadPieces);
+                    for (let w = p; w <= windowEnd; w++) t.pieceManager.prioritizePiece(w);
+                }
                 this.runScheduler(Date.now());
                 t.kickRequests();
                 if (!t.pieceManager.haveBitfield.get(p)) await this.waitForPiece(t, p);
@@ -569,19 +584,25 @@ export class TorrentManager extends EventEmitter {
                 this.emit("update");
             }
         } finally {
-            const remaining = (this.forcedSlots.get(infoHash) || 1) - 1;
-            if (remaining <= 0) this.forcedSlots.delete(infoHash);
-            else this.forcedSlots.set(infoHash, remaining);
+            if (prioritize) {
+                const remaining = (this.forcedSlots.get(infoHash) || 1) - 1;
+                if (remaining <= 0) this.forcedSlots.delete(infoHash);
+                else this.forcedSlots.set(infoHash, remaining);
+                const streams = (this.streamPriority.get(infoHash) || 1) - 1;
+                if (streams <= 0) {
+                    // No prioritized stream left: drop the torrent's priority.
+                    this.streamPriority.delete(infoHash);
+                    this.prioritized.delete(infoHash);
+                    this.applyBandwidthSplit();
+                    this.applyLimiter(m);
+                } else {
+                    this.streamPriority.set(infoHash, streams);
+                }
+            }
             const s = this.rangeStats.get(infoHash) || { outstanding: 1, finished: 0, chunksRequested: 0, chunksReturned: 0 };
             s.outstanding = Math.max(0, s.outstanding - 1);
             s.finished++;
             this.rangeStats.set(infoHash, s);
-            // Once nothing is actively streaming the torrent, drop its priority.
-            if (s.outstanding === 0) {
-                this.prioritized.delete(infoHash);
-                this.applyBandwidthSplit();
-                this.applyLimiter(m);
-            }
             this.runScheduler(Date.now());
             this.emit("update");
         }

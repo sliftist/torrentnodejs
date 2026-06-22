@@ -85,16 +85,26 @@ async function main() {
     assert.match(index.body.toString(), /data-name=/, "index should have a video button with a name");
     assert.match(index.body.toString(), /play/, "index should read the play query param");
 
-    // --- a range request prioritizes the torrent and then hangs (no peers) ---
-    let fileResolved = false;
-    void get({ port, path: `/file/${infoHash}/0?password=${pw}`, headers: { range: "bytes=0-16383" } })
-        .then(() => { fileResolved = true; })
-        .catch(() => { fileResolved = true; });
+    // --- a whole-file request streams but does NOT prioritize (the browser
+    // pulling the entire file shouldn't monopolize the scheduler) ---
+    let wholeResolved = false;
+    void get({ port, path: `/file/${infoHash}/0?password=${pw}` })
+        .then(() => { wholeResolved = true; })
+        .catch(() => { wholeResolved = true; });
     await new Promise((r) => setTimeout(r, 800));
-    assert.equal(fileResolved, false, "file request should wait for the piece (no peers => pending)");
-    assert.equal(manager.isPrioritized(infoHash), true, "an active range request should prioritize the torrent");
-    const streaming = manager.views()[0];
-    assert.equal(streaming.rangeOutstanding, 1, "one outstanding range request should be reported");
+    assert.equal(wholeResolved, false, "whole-file request should wait for the piece (no peers => pending)");
+    assert.equal(manager.isPrioritized(infoHash), false, "a whole-file request should NOT prioritize the torrent");
+    assert.equal(manager.views()[0].rangeOutstanding, 1, "the whole-file request should still count as outstanding");
+
+    // --- a bounded range request (a real seek) DOES prioritize ---
+    let rangeResolved = false;
+    void get({ port, path: `/file/${infoHash}/0?password=${pw}`, headers: { range: "bytes=0-63" } })
+        .then(() => { rangeResolved = true; })
+        .catch(() => { rangeResolved = true; });
+    await new Promise((r) => setTimeout(r, 800));
+    assert.equal(rangeResolved, false, "bounded range request should wait for the piece (no peers => pending)");
+    assert.equal(manager.isPrioritized(infoHash), true, "an active bounded range request should prioritize the torrent");
+    assert.equal(manager.views()[0].rangeOutstanding, 2, "two outstanding range requests should be reported");
 
     await server.stop();
     await manager.stop();
