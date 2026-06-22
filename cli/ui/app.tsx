@@ -136,10 +136,19 @@ export function App(props: AppProps) {
         }
     }
 
-    // Clamp selection to the filtered list.
-    const clampedIndex = Math.min(selectedIndex, Math.max(0, views.length - 1));
-    if (clampedIndex !== selectedIndex) setSelectedIndex(clampedIndex);
+    // Selection follows the torrent itself (by infoHash), not its row number —
+    // the list re-sorts constantly, so an index would point at a different
+    // torrent every render. Fall back to the last position only when the
+    // selected torrent has vanished (deleted/filtered out).
+    const hashIndex = views.findIndex((v) => v.infoHash === selectedHash);
+    const clampedIndex = hashIndex >= 0 && hashIndex || Math.min(selectedIndex, Math.max(0, views.length - 1));
     const selected = views[clampedIndex];
+
+    function selectIndex(i: number): void {
+        const clamped = Math.min(views.length - 1, Math.max(0, i));
+        setSelectedIndex(clamped);
+        setSelectedHash(views[clamped]?.infoHash);
+    }
 
     const detail = view === "detail" && selectedHash ? manager.detail(selectedHash) : undefined;
     const detailViewModel = view === "detail" && selectedHash
@@ -172,7 +181,7 @@ export function App(props: AppProps) {
             if (sectionStarts[i] <= clampedIndex) cur = i;
         }
         const next = Math.min(sectionStarts.length - 1, Math.max(0, cur + dir));
-        setSelectedIndex(sectionStarts[next]);
+        selectIndex(sectionStarts[next]);
     }
 
     // Built fresh each render so labels (Pause/Resume, current mode) stay live.
@@ -307,8 +316,8 @@ export function App(props: AppProps) {
 
         // list view
         if (key.tab) { manager.setMode(nextRunMode(manager.runMode)); return; }
-        if (key.upArrow) { setSelectedIndex((i) => Math.max(0, i - 1)); return; }
-        if (key.downArrow) { setSelectedIndex((i) => Math.min(views.length - 1, i + 1)); return; }
+        if (key.upArrow) { selectIndex(clampedIndex - 1); return; }
+        if (key.downArrow) { selectIndex(clampedIndex + 1); return; }
         if (key.pageUp) { jumpSection(-1); return; }
         if (key.pageDown) { jumpSection(1); return; }
         if (key.rightArrow || key.return) { if (selected) openDetail(selected); return; }
