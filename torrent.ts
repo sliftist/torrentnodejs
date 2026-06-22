@@ -1,7 +1,6 @@
 import { EventEmitter } from "events";
-import crypto from "crypto";
 import { Transport } from "./transport";
-import { TorrentMeta, pieceLengthAt } from "./torrentFile";
+import { TorrentMeta } from "./torrentFile";
 import { TrackerPool } from "./trackerPool";
 import { PeerAddress } from "./trackerHttp";
 import { PeerConnection } from "./peerConnection";
@@ -430,9 +429,7 @@ export class Torrent extends EventEmitter {
     // so it's re-downloaded instead of serving corruption to a peer.
     private async verifyPieceForUpload(index: number): Promise<boolean> {
         if (this.uploadVerified.has(index)) return true;
-        const piece = await this.storage.readBlock(index, 0, pieceLengthAt(this.meta, index));
-        const ok = crypto.createHash("sha1").update(piece).digest().equals(this.meta.pieceHashes[index]);
-        if (ok) {
+        if (await this.storage.verifyPiece(index)) {
             this.uploadVerified.add(index);
             return true;
         }

@@ -15,18 +15,16 @@ interface FilePlan {
     // True once every piece of this file is present and it has been renamed
     // from the temp dir into its final location.
     finalized: boolean;
-    // Size of an existing file at finalPath on disk, if any. Set even when the
-    // size doesn't match the torrent's expected length — that's how we read and
-    // salvage a partial or mismatched output file rather than reporting 0%.
+    // Raw stat of the file physically on disk at finalPath, if any. Set even when
+    // the size doesn't match the torrent's expected length — that's how we read
+    // and salvage a partial or mismatched output file rather than reporting 0%.
     existingFinalSize?: number;
     existingFinalMtimeMs?: number;
-    // Size + mtime of whatever file physically backs "existing" reads — the final
-    // output file when present, else the allocated temp copy. Keys the
-    // verified-piece cache so an unchanged file (final OR partial/temp) is never
-    // re-hashed; writing new blocks bumps the temp file's mtime and invalidates
-    // it, which is exactly when a re-hash is warranted.
-    existingSize?: number;
-    existingMtimeMs?: number;
+    // Raw stat of the in-progress temp copy when it (and not a final output file)
+    // backs this plan's bytes. Only recorded when there's no final file, since
+    // existingSource() always prefers the final file when one is present.
+    existingTempSize?: number;
+    existingTempMtimeMs?: number;
 }
 
 // On-disk record of a previous verification, stored alongside the output files.
@@ -115,40 +113,32 @@ export class Storage {
             const allocated = touchedFiles.has(f);
             const plan: FilePlan = { file: f, finalPath, tempPath, allocated, finalized: false };
             this.filePlans.push(plan);
-            // Record any existing output file's size for verify/import, even for
-            // files we won't actively write (so a scan can read them too).
+            // Record any existing output file's stat for verify/import/cache, even
+            // for files we won't actively write (so a scan can read them too).
+            // existingSource() turns these raw stats into the single decision of
+            // which file backs this plan's bytes.
             const finalStat = await stat(finalPath).catch(() => undefined);
             if (finalStat) {
                 plan.existingFinalSize = finalStat.size;
                 plan.existingFinalMtimeMs = finalStat.mtimeMs;
             }
-            if (!allocated) {
-                if (finalStat) {
-                    plan.existingSize = finalStat.size;
-                    plan.existingMtimeMs = finalStat.mtimeMs;
-                }
-                continue;
-            }
+            if (!allocated) continue;
             // Already complete from a previous run? Read it straight from its
             // final spot; no temp file needed.
             if (finalStat && finalStat.size === f.length) {
                 plan.finalized = true;
-                plan.existingSize = finalStat.size;
-                plan.existingMtimeMs = finalStat.mtimeMs;
                 continue;
             }
             await this.allocate(tempPath, f.length);
-            // An existing (mis-sized) output file still backs reads for salvage;
-            // otherwise the temp copy we just ensured does. Record whichever one
-            // so a repeat scan can trust it from the cache without re-hashing.
-            if (finalStat) {
-                plan.existingSize = finalStat.size;
-                plan.existingMtimeMs = finalStat.mtimeMs;
-            } else {
+            // With no final output file, the temp copy we just ensured backs
+            // reads; record its stat so a repeat scan trusts it from the cache.
+            // (When a final file exists, existingSource prefers it, so the temp
+            // stat would be unused — skip it.)
+            if (!finalStat) {
                 const tempStat = await stat(tempPath).catch(() => undefined);
                 if (tempStat) {
-                    plan.existingSize = tempStat.size;
-                    plan.existingMtimeMs = tempStat.mtimeMs;
+                    plan.existingTempSize = tempStat.size;
+                    plan.existingTempMtimeMs = tempStat.mtimeMs;
                 }
             }
         }
@@ -291,9 +281,10 @@ export class Storage {
     private pieceUnchanged(index: number, cached: CheckedCache): boolean {
         for (const plan of this.plansForPiece(index)) {
             if (plan.file.length === 0) continue;
-            if (plan.existingSize === undefined || plan.existingMtimeMs === undefined) return false;
+            const src = this.existingSource(plan);
+            if (!src || src.mtimeMs === undefined) return false;
             const c = cached.files[plan.file.path.join("/")];
-            if (!c || c.size !== plan.existingSize || c.mtimeMs !== plan.existingMtimeMs) return false;
+            if (!c || c.size !== src.size || c.mtimeMs !== src.mtimeMs) return false;
         }
         return true;
     }
@@ -344,8 +335,9 @@ export class Storage {
         const files: Record<string, { size: number; mtimeMs: number }> = {};
         for (const plan of this.filePlans) {
             if (!touched.has(plan.file)) continue;
-            if (plan.existingSize === undefined || plan.existingMtimeMs === undefined) continue;
-            files[plan.file.path.join("/")] = { size: plan.existingSize, mtimeMs: plan.existingMtimeMs };
+            const src = this.existingSource(plan);
+            if (!src || src.mtimeMs === undefined) continue;
+            files[plan.file.path.join("/")] = { size: src.size, mtimeMs: src.mtimeMs };
         }
         const cache: CheckedCache = {
             version: CHECKED_CACHE_VERSION,
@@ -371,6 +363,16 @@ export class Storage {
         if (!this.opened) throw new Error("Storage not open");
         const pieceStart = pieceIndex * this.meta.pieceLength;
         return this.readAt(pieceStart + begin, length);
+    }
+
+    // SHA-1-check a single piece's bytes as they currently sit on disk (the
+    // managed copy: finalized output, else temp). Used to re-confirm a piece is
+    // still intact before serving it to a peer, so on-disk verification lives
+    // only here and in verifyExistingPieces.
+    async verifyPiece(index: number): Promise<boolean> {
+        if (!this.opened) throw new Error("Storage not open");
+        const data = await this.readBlock(index, 0, pieceLengthAt(this.meta, index));
+        return crypto.createHash("sha1").update(data).digest().equals(this.meta.pieceHashes[index]);
     }
 
     // O_RDWR | O_CREAT — create if missing, don't truncate existing data.
@@ -458,10 +460,19 @@ export class Storage {
         return out;
     }
 
-    // Where physically-present bytes for this file live, for "existing" reads.
-    private existingSource(plan: FilePlan): { path: string; limit: number } | undefined {
-        if (plan.existingFinalSize !== undefined) return { path: plan.finalPath, limit: plan.existingFinalSize };
-        if (plan.allocated) return { path: plan.tempPath, limit: plan.file.length };
+    // The one place that decides which file physically backs a plan's bytes: the
+    // final output file when present (clamped to its real size for salvage),
+    // otherwise the allocated temp copy. Returns its read path + readable limit
+    // and its on-disk identity (size + mtime) for cache keying. Everything that
+    // touches existing on-disk data — reads, the verified-piece cache, and the
+    // verify-target label — goes through here, so they can never disagree.
+    private existingSource(plan: FilePlan): { path: string; limit: number; size: number; mtimeMs?: number } | undefined {
+        if (plan.existingFinalSize !== undefined) {
+            return { path: plan.finalPath, limit: plan.existingFinalSize, size: plan.existingFinalSize, mtimeMs: plan.existingFinalMtimeMs };
+        }
+        if (plan.allocated && plan.existingTempSize !== undefined) {
+            return { path: plan.tempPath, limit: plan.file.length, size: plan.existingTempSize, mtimeMs: plan.existingTempMtimeMs };
+        }
         return undefined;
     }
 
