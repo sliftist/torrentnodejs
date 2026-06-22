@@ -45,6 +45,8 @@ const LIMIT_FIELDS: { key: keyof SchedulerSettings; label: string }[] = [
     { key: "optimisticUnchokeSlots", label: "Optimistic slots" },
     { key: "downloadSkipLimitMs", label: "Skip stalled (ms)" },
     { key: "watchIntervalMs", label: "Rescan folders (ms)" },
+    { key: "concurrentScans", label: "Concurrent scans" },
+    { key: "verifyScanMbps", label: "Verify scan (MB/s, 0=∞)" },
 ];
 
 // Cap UI redraws to ~14 fps. Coalesces bursts of manager "update" events into a
@@ -206,7 +208,7 @@ export function App(props: AppProps) {
             });
         }
         acts.push({ label: "Add folder…", run: () => { setFolderDraft(""); setOverlay("addFolder"); } });
-        acts.push({ label: "Edit limits…", run: openLimits });
+        acts.push({ label: "Options…", run: openLimits });
         if (webUrl && webPassword) {
             acts.push({
                 label: "Show web password",
@@ -262,7 +264,7 @@ export function App(props: AppProps) {
                     if (isFinite(n) && n >= 0) changes[f.key] = n;
                 }
                 onSchedulerChange(changes);
-                setNotice("Limits updated");
+                setNotice("Options updated");
                 setOverlay("none");
                 return;
             }
@@ -301,6 +303,7 @@ export function App(props: AppProps) {
 
         // Resting state: shared keys first.
         if (input === "a") { setActionIndex(0); setOverlay("actions"); return; }
+        if (input === "o") { openLimits(); return; }
         if (input === "/") { setOverlay("filter"); return; }
 
         if (view === "detail") {
@@ -393,7 +396,7 @@ function LimitsEditor(props: { draft: Record<string, string>; index: number }) {
     const { draft, index } = props;
     return (
         <Box flexDirection="column" width={MENU_WIDTH} borderStyle="round" borderColor="cyan" paddingX={1}>
-            <Text bold color="cyan">Edit limits</Text>
+            <Text bold color="cyan">Options</Text>
             {LIMIT_FIELDS.map((f, i) => {
                 const active = i === index;
                 return (
@@ -479,8 +482,8 @@ function Footer(props: {
 }
 
 function hintFor(view: View): string {
-    if (view === "detail") return "Tab/⇧Tab tabs · ↑↓ scroll · a actions · ← back · ^C quit";
-    return "↑↓ select · →/Enter open · PgUp/PgDn section · / filter · a actions · Tab mode · ^C quit";
+    if (view === "detail") return "Tab/⇧Tab tabs · ↑↓ scroll · a actions · o options · ← back · ^C quit";
+    return "↑↓ select · →/Enter open · / filter · a actions · o options · Tab mode · ^C quit";
 }
 
 function nextRunMode(current: RunMode): RunMode {
