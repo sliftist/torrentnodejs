@@ -169,6 +169,12 @@ interface Pending {
     onProgress?: (progress: VerifyProgress) => void;
 }
 
+// A queued verify carries a builder, not a built job: the heavy index/hash
+// arrays are allocated only when the job actually dispatches, so thousands of
+// torrents can wait in the queue without all of them holding their arrays in
+// memory at once.
+type BuildJob = () => VerifyJob;
+
 export interface VerifyProgress {
     piecesRead: number;
     bytesRead: number;
@@ -185,14 +191,19 @@ type WorkerMessage =
 export class VerifyPool {
     private readonly workers: Worker[] = [];
     private readonly idle: Worker[] = [];
-    private readonly queue: { id: number; job: VerifyJob; pending: Pending }[] = [];
+    private readonly queue: { id: number; buildJob: BuildJob; pending: Pending }[] = [];
     private readonly pending = new Map<number, Pending>();
     private nextId = 0;
     // Per-worker disk-read cap in bytes per second (0 = unlimited), injected into
     // every dispatched job. Set from the global verify scan limit.
     private maxBytesPerSec = 0;
+    // How many verifies may hash concurrently. There's one worker per core, but
+    // the scheduler's concurrentScans throttles disk contention below that, so a
+    // big batch of torrents reads a few at a time instead of thrashing the disk.
+    private maxConcurrent: number;
 
     constructor(size = Math.max(1, os.cpus().length - 1)) {
+        this.maxConcurrent = size;
         for (let i = 0; i < size; i++) {
             const worker = new Worker(WORKER_SOURCE, { eval: true });
             worker.unref();
@@ -209,10 +220,9 @@ export class VerifyPool {
             return;
         }
         this.pending.delete(msg.id);
+        this.idle.push(worker);
         if (this.pending.size === 0) for (const w of this.workers) w.unref();
-        const next = this.queue.shift();
-        if (next) this.dispatch(worker, next.id, next.job, next.pending);
-        else this.idle.push(worker);
+        this.pump();
         if (!entry) return;
         if (msg.type === "error") {
             entry.reject(new Error(msg.message));
@@ -225,20 +235,34 @@ export class VerifyPool {
         this.maxBytesPerSec = Math.max(0, maxBytesPerSec);
     }
 
-    private dispatch(worker: Worker, id: number, job: VerifyJob, pending: Pending) {
+    setMaxConcurrent(maxConcurrent: number): void {
+        this.maxConcurrent = Math.max(1, maxConcurrent);
+        this.pump();
+    }
+
+    // Dispatch as many queued jobs as the concurrency cap and idle workers allow.
+    private pump(): void {
+        while (this.pending.size < this.maxConcurrent && this.queue.length && this.idle.length) {
+            const worker = this.idle.pop();
+            const next = this.queue.shift();
+            if (!worker || !next) break;
+            this.dispatch(worker, next.id, next.buildJob, next.pending);
+        }
+    }
+
+    private dispatch(worker: Worker, id: number, buildJob: BuildJob, pending: Pending) {
         if (this.pending.size === 0) for (const w of this.workers) w.ref();
         this.pending.set(id, pending);
+        const job = buildJob();
         job.maxBytesPerSec = this.maxBytesPerSec;
         worker.postMessage({ id, job }, [job.indices.buffer as ArrayBuffer, job.hashes.buffer as ArrayBuffer]);
     }
 
-    run(job: VerifyJob, onProgress?: (progress: VerifyProgress) => void): Promise<VerifyResult> {
+    run(buildJob: BuildJob, onProgress?: (progress: VerifyProgress) => void): Promise<VerifyResult> {
         return new Promise<VerifyResult>((resolve, reject) => {
             const id = this.nextId++;
-            const pending: Pending = { resolve, reject, onProgress };
-            const worker = this.idle.pop();
-            if (worker) this.dispatch(worker, id, job, pending);
-            else this.queue.push({ id, job, pending });
+            this.queue.push({ id, buildJob, pending: { resolve, reject, onProgress } });
+            this.pump();
         });
     }
 

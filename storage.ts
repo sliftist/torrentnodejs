@@ -5,7 +5,7 @@ import path from "path";
 import { TorrentMeta, TorrentFile, pieceLengthAt } from "./torrentFile";
 import { Bitfield } from "./bitfield";
 import { tryStat, pathExists } from "./fsUtils";
-import { sharedVerifyPool } from "./verifyPool";
+import { sharedVerifyPool, VerifyJob } from "./verifyPool";
 
 interface FilePlan {
     file: TorrentFile;
@@ -332,25 +332,23 @@ export class Storage {
             // was slower than single-threaded. The worker reads from whatever
             // currently backs each file (final output or temp copy), resolved
             // here so the cache/decision logic stays on the main thread.
-            const files = this.filePlans.map((plan) => {
-                const src = this.existingSource(plan);
+            // Built lazily by the pool at dispatch (not here), so a torrent
+            // waiting its turn behind the concurrentScans cap doesn't hold its
+            // index/hash arrays in memory while queued.
+            const buildJob = (): VerifyJob => {
+                const files = this.filePlans.map((plan) => {
+                    const src = this.existingSource(plan);
+                    return {
+                        offsetInTorrent: plan.file.offsetInTorrent,
+                        length: plan.file.length,
+                        srcPath: src?.path,
+                        srcLimit: src?.limit ?? 0,
+                    };
+                });
+                const indices = Int32Array.from(toRead);
+                const hashes = new Uint8Array(toRead.length * 20);
+                for (let k = 0; k < toRead.length; k++) hashes.set(this.meta.pieceHashes[toRead[k]], k * 20);
                 return {
-                    offsetInTorrent: plan.file.offsetInTorrent,
-                    length: plan.file.length,
-                    srcPath: src?.path,
-                    srcLimit: src?.limit ?? 0,
-                };
-            });
-            const indices = Int32Array.from(toRead);
-            const hashes = new Uint8Array(toRead.length * 20);
-            for (let k = 0; k < toRead.length; k++) hashes.set(this.meta.pieceHashes[toRead[k]], k * 20);
-            // The worker reports bytes read so far as it streams; fold each delta
-            // into the global counter live so the UI's read-rate (and the verify
-            // ETA derived from it) tracks a long scan instead of jumping only when
-            // the whole torrent finishes.
-            let reportedBytes = 0;
-            const { verified, mismatches, bytesRead } = await sharedVerifyPool().run(
-                {
                     files,
                     pieceLength: this.meta.pieceLength,
                     totalLength: this.meta.totalLength,
@@ -361,7 +359,15 @@ export class Storage {
                     wantMismatch: Boolean(config?.onMismatch),
                     // Injected by the pool at dispatch from the global scan cap.
                     maxBytesPerSec: 0,
-                },
+                };
+            };
+            // The worker reports bytes read so far as it streams; fold each delta
+            // into the global counter live so the UI's read-rate (and the verify
+            // ETA derived from it) tracks a long scan instead of jumping only when
+            // the whole torrent finishes.
+            let reportedBytes = 0;
+            const { verified, mismatches, bytesRead } = await sharedVerifyPool().run(
+                buildJob,
                 (progress) => {
                     diskIO.bytesRead += progress.bytesRead - reportedBytes;
                     reportedBytes = progress.bytesRead;

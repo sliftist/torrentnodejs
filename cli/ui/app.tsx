@@ -327,7 +327,19 @@ export function App(props: AppProps) {
     });
 
     const width = dims.cols;
-    const bodyHeight = Math.max(4, dims.rows - CHROME_HEIGHT);
+    // An open overlay (actions/options/confirm) is a sibling rendered below the
+    // body, so its lines have to come OUT of the body's budget — otherwise the
+    // column is taller than the terminal and Ink can't erase the previous frame,
+    // leaving ghosted text. Measure the overlay and shrink the body to match.
+    let overlayHeight = 0;
+    let limitsVisible = LIMIT_FIELDS.length;
+    if (overlay === "actions") overlayHeight = actions.length + 4;
+    else if (overlay === "confirmDelete" && pendingDelete) overlayHeight = 6;
+    else if (overlay === "limits") {
+        limitsVisible = Math.max(3, Math.min(LIMIT_FIELDS.length, dims.rows - CHROME_HEIGHT - 7));
+        overlayHeight = limitsVisible + 6;
+    }
+    const bodyHeight = Math.max(1, dims.rows - CHROME_HEIGHT - overlayHeight);
     const agg = manager.aggregate();
 
     let body: React.ReactNode;
@@ -344,7 +356,7 @@ export function App(props: AppProps) {
                 {body}
             </Box>
             {overlay === "actions" && <ActionsMenu actions={actions} index={actionIndex} />}
-            {overlay === "limits" && <LimitsEditor draft={limitsDraft} index={limitIndex} maxVisible={Math.max(3, dims.rows - 21)} />}
+            {overlay === "limits" && <LimitsEditor draft={limitsDraft} index={limitIndex} maxVisible={limitsVisible} />}
             {overlay === "confirmDelete" && pendingDelete && <ConfirmDelete name={pendingDelete.name} width={width} />}
             <Footer
                 width={width}

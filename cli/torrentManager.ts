@@ -307,12 +307,16 @@ export class TorrentManager extends EventEmitter {
 
     // The global verify scan cap (MB/s) is shared across the concurrent scans the
     // scheduler allows, so each worker self-limits to its slice and the aggregate
-    // disk read stays under the cap when fully loaded. 0 means unlimited.
+    // disk read stays under the cap when fully loaded. 0 means unlimited. The
+    // concurrentScans cap also bounds how many torrents hash at once — cache-only
+    // (no read) verifies never enter the pool, so they resolve immediately
+    // instead of waiting behind torrents grinding through a full disk re-hash.
     private applyVerifyScanLimit(): void {
         const perWorker = this.scheduler.verifyScanMbps > 0
             && (this.scheduler.verifyScanMbps * 1_000_000) / Math.max(1, this.scheduler.concurrentScans)
             || 0;
         sharedVerifyPool().setMaxBytesPerSec(perWorker);
+        sharedVerifyPool().setMaxConcurrent(this.scheduler.concurrentScans);
     }
 
     get runMode(): RunMode { return this.mode; }
@@ -1178,7 +1182,6 @@ export class TorrentManager extends EventEmitter {
     }
 
     private ensureStarted(torrents: ManagedTorrent[]): void {
-        let inFlight = torrents.filter((m) => m.starting).length;
         const toStart = torrents
             .filter((m) => {
                 if (m.torrent || m.starting || m.paused || m.error) return false;
@@ -1186,12 +1189,15 @@ export class TorrentManager extends EventEmitter {
                 if (this.mode === "scan" && (m.started)) return false;
                 return true;
             })
+            // Lower queueOrder starts first, so the verify pool enqueues
+            // hashing work in queue order.
             .sort((a, b) => a.queueOrder - b.queueOrder);
-        for (const m of toStart) {
-            if (inFlight >= this.scheduler.concurrentScans) break;
-            void this.startTorrent(m);
-            inFlight++;
-        }
+        // Start them all: the cheap cache-resolution phase runs right away for
+        // every torrent, and only those that still need disk reads enter the
+        // verify pool, which throttles hashing to concurrentScans. This is what
+        // lets a cache-covered torrent come online without waiting behind a
+        // torrent that's busy re-hashing gigabytes.
+        for (const m of toStart) void this.startTorrent(m);
     }
 
     private async startTorrent(m: ManagedTorrent): Promise<void> {
