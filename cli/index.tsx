@@ -1,13 +1,31 @@
 import React from "react";
 import { render } from "ink";
+import path from "path";
+import { copyFile, rename, mkdir } from "fs/promises";
 import { WireGuardNetwork } from "wireguardnodejs";
 import { App } from "./ui/app";
 import { TorrentManager } from "./torrentManager";
 import { SourceWatcher } from "./watcher";
-import { Config, configExists, loadConfig, saveConfig, expandHome, parseRunMode, MODE_LABEL, MODE_DESC } from "./config";
+import { Config, configExists, loadConfig, saveConfig, expandHome, pathExists, parseRunMode, MODE_LABEL, MODE_DESC } from "./config";
 import { runFirstRunSetup } from "./setup";
 import { WgTransport } from "./wgTransport";
 import { WebCommandServer } from "./web/webServer";
+
+async function ingestCopySource(torrentPath: string, copyDest: string | undefined, manager: TorrentManager): Promise<void> {
+    // Without a regular source to archive into, just load it in place.
+    if (!copyDest) {
+        await manager.addSourceFile(torrentPath);
+        return;
+    }
+    await mkdir(copyDest, { recursive: true });
+    const dest = path.join(copyDest, path.basename(torrentPath));
+    if (!(await pathExists(dest))) {
+        const tmp = path.join(copyDest, `.${path.basename(torrentPath)}.tmp`);
+        await copyFile(torrentPath, tmp);
+        await rename(tmp, dest);
+    }
+    await manager.addSourceFile(dest);
+}
 
 async function main() {
     const mode = parseRunMode(process.argv[2]);
@@ -42,8 +60,21 @@ async function main() {
     });
     watcher.setFolders(config.sources);
 
+    // Copy sources are a separate location scanned continuously after startup.
+    // Anything found is archived into the first regular source (write-temp then
+    // rename so a partial copy is never observed) and then loaded, so deleting
+    // the original from the copy source can't lose the torrent.
+    const copyDest = config.sources[0];
+    const copyWatcher = new SourceWatcher({
+        intervalMs: config.scheduler.watchIntervalMs,
+        onAdd: (p) => void ingestCopySource(p, copyDest, manager),
+        onRemove: () => {},
+    });
+    copyWatcher.setFolders(config.copySources);
+
     await manager.start();
     watcher.start();
+    copyWatcher.start();
 
     // Public-interface HTTPS status/file server. This is the one component
     // allowed to listen and talk OUTSIDE the WireGuard tunnel; the word-password
@@ -93,6 +124,7 @@ async function main() {
     await app.waitUntilExit();
 
     watcher.stop();
+    copyWatcher.stop();
     await webServer.stop();
     await manager.stop();
     wg.close();

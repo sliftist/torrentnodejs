@@ -63,6 +63,10 @@ export interface Config {
     downloadDir: string;
     // Folders watched for .torrent files appearing/disappearing.
     sources: string[];
+    // Folders watched continuously for .torrent files. Any found are copied
+    // into the first regular source (so the originals can be deleted from the
+    // copy source without losing the torrent) and then loaded.
+    copySources: string[];
     // TCP port we ask WireGuard to listen on for inbound peers (seeding).
     listenPort: number;
     // Public-interface HTTPS port for the web status/file server.
@@ -102,6 +106,7 @@ export async function loadConfig(dir = process.cwd()): Promise<Config> {
         wireguardConfigPath: expandHome(parsed.wireguardConfigPath),
         downloadDir: expandHome(parsed.downloadDir),
         sources: (parsed.sources || []).map(expandHome),
+        copySources: (parsed.copySources || []).map(expandHome),
         listenPort: parsed.listenPort ?? 6881,
         webPort: parsed.webPort ?? 8443,
         scheduler: { ...DEFAULT_SCHEDULER, ...(parsed.scheduler || {}) },

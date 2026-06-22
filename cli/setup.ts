@@ -33,6 +33,7 @@ export async function runFirstRunSetup(): Promise<Config> {
             wireguardConfigPath,
             downloadDir,
             sources: [],
+            copySources: [],
             listenPort: 6881,
             webPort: 8443,
             scheduler: { ...DEFAULT_SCHEDULER },

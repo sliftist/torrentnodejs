@@ -38,6 +38,7 @@ async function main() {
         wireguardConfigPath: "/tmp/fake.conf",
         downloadDir,
         sources: [sourceDir],
+        copySources: [],
         listenPort: 6881,
         webPort: 8443,
         scheduler: { ...DEFAULT_SCHEDULER },
@@ -46,6 +47,7 @@ async function main() {
     const loaded = await loadConfig(work);
     assert.strictEqual(loaded.downloadDir, downloadDir);
     assert.deepStrictEqual(loaded.sources, [sourceDir]);
+    assert.deepStrictEqual(loaded.copySources, []);
     assert.strictEqual(loaded.scheduler.downloadSlots, DEFAULT_SCHEDULER.downloadSlots);
     console.log("config roundtrip OK");
 
@@ -126,6 +128,31 @@ async function main() {
     views = manager.views();
     assert.strictEqual(views.length, 0, `expected 0 after removal, got ${views.length}`);
     console.log("removal detected, torrent dropped");
+
+    // --- copy source: a .torrent appearing in a watched copy folder is copied
+    // into the first regular source, then loaded — so deleting the original
+    // can't lose it. ---
+    const copyDir = path.join(work, "copy");
+    await mkdir(copyDir, { recursive: true });
+    const copyWatcher = new SourceWatcher({
+        intervalMs: 200,
+        onAdd: (p) => void (async () => {
+            const dest = path.join(sourceDir, path.basename(p));
+            await copyFile(p, dest);
+            await manager.addSourceFile(dest);
+        })(),
+        onRemove: () => {},
+    });
+    copyWatcher.setFolders([copyDir]);
+    copyWatcher.start();
+    await copyFile(torrentSrc, path.join(copyDir, "bbb.torrent"));
+    await delay(800);
+    const archived = await readdir(sourceDir);
+    assert.ok(archived.includes("bbb.torrent"), `expected bbb.torrent archived into source, saw ${archived.join(",")}`);
+    views = manager.views();
+    assert.strictEqual(views.length, 1, `expected 1 torrent from copy source, got ${views.length}`);
+    console.log("copy source archived + loaded the torrent");
+    copyWatcher.stop();
 
     watcher.stop();
     await manager.stop();
