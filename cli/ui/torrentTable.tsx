@@ -47,8 +47,9 @@ export function TorrentTable(props: {
     selectedHash?: string;
     width: number;
     height: number;
+    verifyEtaMs: number;
 }) {
-    const { sections, selectedHash, width, height } = props;
+    const { sections, selectedHash, width, height, verifyEtaMs } = props;
     const nameWidth = Math.max(10, width - 120);
     const total = sections.reduce((a, s) => a + s.items.length, 0);
 
@@ -112,6 +113,7 @@ export function TorrentTable(props: {
                                 {row.section.title}
                             </Text>
                             <Text dimColor>{`  (${row.section.items.length} · ${formatBytes(groupBytes)})`}</Text>
+                            {row.section.key === "verifying" && verifyEtaMs > 0 && <Text color="blue">{`  ETA ${formatEta(verifyEtaMs / 1000)}`}</Text> || undefined}
                         </Box>
                     );
                 }

@@ -1,7 +1,7 @@
 import { EventEmitter } from "events";
 import crypto from "crypto";
 import path from "path";
-import { readFile, writeFile, rm, readdir } from "fs/promises";
+import { readFile, writeFile, rm } from "fs/promises";
 import { tryStat } from "../fsUtils";
 import { Transport } from "../transport";
 import { Torrent, RunMode } from "../torrent";
@@ -461,58 +461,51 @@ export class TorrentManager extends EventEmitter {
     async deleteTorrent(infoHash: string): Promise<void> {
         const m = this.torrents.get(infoHash);
         if (!m) return;
-        if (m.torrent) {
-            try {
-                await m.torrent.stop();
-            } catch {}
-        }
 
-        // Remove the .torrent file wherever it lives. bySource covers already
-        // loaded files; scanning the source and copy-source folders also catches
-        // a copy-source original (only its copy gets loaded) and any file not yet
-        // picked up by the watcher — otherwise it would just be re-added.
+        // Drop it from the list and every in-memory map FIRST, then emit, so the
+        // UI reflects the deletion immediately. The teardown + disk cleanup below
+        // can stop a verifying torrent or scan hundreds of source files — none of
+        // that must be allowed to keep a "deleted" torrent on screen.
+        const sourcePaths: string[] = [];
         for (const [source, hash] of [...this.bySource.entries()]) {
             if (hash !== infoHash) continue;
             this.bySource.delete(source);
-            try {
-                await rm(source, { force: true });
-            } catch {}
+            sourcePaths.push(source);
         }
-        for (const folder of new Set([...this.sources, ...this.copySources])) {
-            let entries: string[];
-            try {
-                entries = await readdir(folder);
-            } catch {
-                continue;
-            }
-            for (const name of entries) {
-                if (!name.toLowerCase().endsWith(".torrent")) continue;
-                const full = path.join(folder, name);
-                let fileHash: string;
-                try {
-                    fileHash = (await parseTorrentFile(full)).infoHash.toString("hex");
-                } catch {
-                    continue;
-                }
-                if (fileHash !== infoHash) continue;
-                this.bySource.delete(full);
-                try {
-                    await rm(full, { force: true });
-                } catch {}
-            }
-        }
-
-        await new Storage(m.meta, this.downloadDir).deleteOnDiskData();
-
         this.torrents.delete(infoHash);
         this.prioritized.delete(infoHash);
         this.forcedSlots.delete(infoHash);
         this.streamPriority.delete(infoHash);
         this.rangeStats.delete(infoHash);
         this.pausedPersisted.delete(infoHash);
-        await this.saveState();
         this.emit("notice", `Deleted ${m.name}`);
         this.emit("update");
+        await this.saveState();
+
+        if (m.torrent) {
+            try {
+                await m.torrent.stop();
+            } catch {}
+        }
+
+        // Remove the .torrent file wherever it lives. We loaded it from known
+        // source paths, and a copy-source keeps the original under the same
+        // basename (its copy is what got archived + loaded). Delete those exact
+        // paths — rm with force no-ops when the file (or its folder) is absent,
+        // so there's no point scanning and re-parsing every file in the folders.
+        const targets = new Set(sourcePaths);
+        for (const source of sourcePaths) {
+            const base = path.basename(source);
+            for (const folder of this.copySources) targets.add(path.join(folder, base));
+        }
+        for (const target of targets) {
+            this.bySource.delete(target);
+            try {
+                await rm(target, { force: true });
+            } catch {}
+        }
+
+        await new Storage(m.meta, this.downloadDir).deleteOnDiskData();
     }
 
     // ---- user controls ----
@@ -796,7 +789,11 @@ export class TorrentManager extends EventEmitter {
 
     aggregate(): AggregateView {
         let downloading = 0, seeding = 0, paused = 0, downRate = 0, upRate = 0, dl = 0, ul = 0;
-        let verifyBytesRemaining = 0;
+        // Verify ETA must cover every torrent still waiting to be hashed, not just
+        // the few actively scanning — only `concurrentScans` run at once, so the
+        // rest are queued behind them. Total work = full size of all unverified
+        // torrents; subtract what the active scans have already read.
+        let verifyBytesTotal = 0, verifyBytesRead = 0, anyVerifying = false;
         for (const m of this.torrents.values()) {
             const complete = this.isComplete(m);
             if (m.paused) paused++;
@@ -806,10 +803,14 @@ export class TorrentManager extends EventEmitter {
             upRate += m.upRate;
             dl += m.torrent?.downloadedBytes ?? 0;
             ul += m.torrent?.uploadedBytes ?? 0;
-            const vp = m.torrent?.verifyProgress;
-            if (vp) verifyBytesRemaining += Math.max(0, vp.bytesToRead - vp.bytesRead);
+            if (!m.verified && !m.error && !m.paused) {
+                verifyBytesTotal += m.meta.totalLength;
+                const vp = m.torrent?.verifyProgress;
+                if (vp) { verifyBytesRead += vp.bytesRead; anyVerifying = true; }
+            }
         }
-        const verifyEtaMs = verifyBytesRemaining > 0 && this.diskReadRate > 0 && (verifyBytesRemaining / this.diskReadRate) * 1000 || 0;
+        const verifyRemaining = Math.max(0, verifyBytesTotal - verifyBytesRead);
+        const verifyEtaMs = anyVerifying && verifyRemaining > 0 && this.diskReadRate > 0 && (verifyRemaining / this.diskReadRate) * 1000 || 0;
         const wire = this.transport.trafficStats?.();
         return {
             torrents: this.torrents.size,

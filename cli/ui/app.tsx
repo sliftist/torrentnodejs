@@ -326,17 +326,18 @@ export function App(props: AppProps) {
 
     const width = dims.cols;
     const bodyHeight = Math.max(4, dims.rows - CHROME_HEIGHT);
+    const agg = manager.aggregate();
 
     let body: React.ReactNode;
     if (view === "detail" && detail && detailViewModel) {
         body = <DetailView view={detailViewModel} detail={detail} tab={tab} scroll={scroll} width={width} height={bodyHeight} />;
     } else {
-        body = <TorrentTable sections={sections} selectedHash={selected?.infoHash} width={width} height={bodyHeight} />;
+        body = <TorrentTable sections={sections} selectedHash={selected?.infoHash} width={width} height={bodyHeight} verifyEtaMs={agg.verifyEtaMs} />;
     }
 
     return (
         <Box flexDirection="column" width={width} height={dims.rows}>
-            <Header agg={manager.aggregate()} localIP={localIP} width={width} mode={manager.runMode} />
+            <Header agg={agg} localIP={localIP} width={width} mode={manager.runMode} />
             <Box flexDirection="column" flexGrow={1} marginTop={1}>
                 {body}
             </Box>
