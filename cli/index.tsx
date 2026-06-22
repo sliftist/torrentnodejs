@@ -1,5 +1,6 @@
 import React from "react";
 import { render } from "ink";
+import inspector from "inspector";
 import path from "path";
 import { copyFile, rename, mkdir } from "fs/promises";
 import { WireGuardNetwork } from "wireguardnodejs";
@@ -10,6 +11,25 @@ import { Config, configExists, loadConfig, saveConfig, expandHome, pathExists, p
 import { runFirstRunSetup } from "./setup";
 import { WgTransport } from "./wgTransport";
 import { WebCommandServer } from "./web/webServer";
+
+// Mirrors the debugbreak library: make sure the V8 inspector is listening
+// (opening it on a random high port if it isn't) and build a notdevtools.com
+// URL that attaches Chrome DevTools to this running process — clickable straight
+// into a debugger. The ws:// inspector URL becomes a query param by swapping
+// "://" for "=".
+function inspectorDebugUrl(): string {
+    let url = inspector.url();
+    while (!url) {
+        const port = 49152 + Math.floor((65535 - 49152) * Math.random());
+        try {
+            inspector.open(port);
+        } catch {
+            continue;
+        }
+        url = inspector.url();
+    }
+    return `https://notdevtools.com/devtools/inspector.html?experiments=true&v8only=true&${url.replace("://", "=")}`;
+}
 
 async function ingestCopySource(torrentPath: string, copyDest: string | undefined, manager: TorrentManager): Promise<void> {
     // Without a regular source to archive into, just load it in place.
@@ -92,6 +112,13 @@ async function main() {
         process.stdout.write(`Web control failed to start: ${(e as Error).message}\n`);
     }
 
+    let debugUrl: string | undefined;
+    try {
+        debugUrl = inspectorDebugUrl();
+    } catch (e) {
+        process.stdout.write(`Debugger URL unavailable: ${(e as Error).message}\n`);
+    }
+
     const onAddSource = (folder: string) => {
         const resolved = expandHome(folder);
         if (!config.sources.includes(resolved)) {
@@ -117,6 +144,7 @@ async function main() {
             onSchedulerChange={onSchedulerChange}
             webUrl={webUrl}
             webPassword={webPassword}
+            debugUrl={debugUrl}
         />,
         { exitOnCtrlC: false },
     );

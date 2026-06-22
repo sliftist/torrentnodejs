@@ -20,6 +20,8 @@ export interface AppProps {
     // Connection details for the web-control server, shown via an action.
     webUrl?: string;
     webPassword?: string;
+    // Chrome DevTools URL for attaching a debugger to this process.
+    debugUrl?: string;
 }
 
 type View = "list" | "detail";
@@ -60,7 +62,7 @@ const BODY_MARGIN_TOP = 1;
 const CHROME_HEIGHT = HEADER_HEIGHT + FOOTER_HEIGHT + BODY_MARGIN_TOP;
 
 export function App(props: AppProps) {
-    const { manager, watcher, localIP, onAddSource, onSchedulerChange, webUrl, webPassword } = props;
+    const { manager, watcher, localIP, onAddSource, onSchedulerChange, webUrl, webPassword, debugUrl } = props;
     const { exit } = useApp();
     const { stdout } = useStdout();
 
@@ -342,6 +344,7 @@ export function App(props: AppProps) {
                 output={manager.outputDir}
                 notice={notice}
                 webUrl={webUrl}
+                debugUrl={debugUrl}
             />
         </Box>
     );
@@ -408,8 +411,9 @@ function Footer(props: {
     output: string;
     notice: string;
     webUrl?: string;
+    debugUrl?: string;
 }) {
-    const { width, view, overlay, filter, folderDraft, folders, output, notice, webUrl } = props;
+    const { width, view, overlay, filter, folderDraft, folders, output, notice, webUrl, debugUrl } = props;
 
     let topLine: React.ReactNode;
     if (overlay === "filter") {
@@ -456,6 +460,10 @@ function Footer(props: {
             <Box>
                 <Text dimColor>web: </Text>
                 <Text color={webUrl && "cyan" || "gray"}>{webUrl && truncate(webUrl, width - 8) || "(not started)"}</Text>
+            </Box>
+            <Box>
+                <Text dimColor>debug: </Text>
+                <Text color={debugUrl && "magenta" || "gray"}>{debugUrl && truncate(debugUrl, width - 9) || "(not started)"}</Text>
             </Box>
         </Box>
     );
